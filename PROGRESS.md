@@ -18,16 +18,26 @@
 |---|---|---|---|
 | 新程序里第一个字慢 | 获得焦点时预热图形设备（`92b79df`） | 首个按键的 `do_edit_session` 中位数 36.5ms → 19.4ms（5 个新进程） | 每个进程第一次获得焦点多阻塞约 17ms，多占约 3.9MB 工作集（1.3MB 私有字节）；笔记本上没测 |
 | 候选框重绘慢 | D2D 工厂改用 `D2D1_DEBUG_LEVEL_NONE`（`7a5b370`） | `ui.do_paint` 中位数 3.38ms → 1.74ms | 目标笔记本上有没有 `D2D1Debug3.dll` 没验证，没有的话收益可能为零 |
-| 后台卡住拖垮宿主 | 管道调用加超时、熔断，并修了几个缺陷（第 4 阶段） | 服务端挂起 4 秒：被卡的按键 5 个/2863ms（只有超时）→ 2 个/755ms（加熔断）；组字中途挂起 8 秒：2 个/约 1.06 秒。基线是一次连续约 4.4 秒（**口径不同**，只能看作量级） | 熔断期间按键直接变成英文字母（这是设计）；探针一次最坏约 530ms |
+| 候选框排版重复测文字 | `D2D::GetTextSize` 复用单个 `IDWriteTextLayout`（`SetMaxWidth`/`SetMaxHeight`）并加 256 项尺寸缓存（未提交） | `HorizontalLayout::DoLayout()`（真实 `WeaselUI.lib`）：全新 7 候选词 p50 1.944ms → 0.676ms（-65%）；重复前缀打字 1.713ms → 0.007ms；几何校验和完全一致 | 每 `WeaselPanel` 最多约 15KB 缓存，样式/DPI 变化自动清空；笔记本未测 |
+| 后台卡住拖垮宿主 | 管道调用加超时、熔断，并修了几个缺陷（第 4 阶段 + 探针收紧，探针收紧未提交） | 服务端挂起 4 秒：被卡的按键 5 个/2863ms（只有超时）→ 2 个/755ms（加熔断）；组字中途挂起 8 秒：2 个/约 1.06 秒；探针收紧后管道全忙时探针耗时 250+250ms → 109.5ms | 熔断期间按键直接变成英文字母（这是设计） |
 | 一个不读响应的客户端拖住所有宿主 | 去掉两端的 `FlushFileBuffers` | 另一个客户端的 `Echo`：5500ms → 0.4ms（4 轮） | 只用自己写的原始管道客户端测过，不是真实被挂起的宿主进程 |
+| 每键多余的 `Echo` 往返 | 1 秒内管道通信正常则跳过 `Echo`（第 5 阶段第 3 项，未提交） | 假服务端 100 键总 IPC 耗时：10.40ms → 5.76ms（-44.6%，0 次 `Echo`）；中途服务端重启自动检测重连并重试，0 丢键 | 若服务端仅做维护而不重启且在 1 秒内完成，最多 1 秒后重新校验；笔记本未测 |
+| 服务端与部署优先级 | `WeaselDeployer` 设 `BELOW_NORMAL`；`WeaselServer` 正常服务设 `ABOVE_NORMAL`，`start_maintenance` 期间临时降为 `BELOW_NORMAL`（第 3 阶段，未提交） | 自动化实测：`WeaselServer` 首次维护 10.8s 全程 `BelowNormal` → 就绪后升 `AboveNormal`；`WeaselDeployer /deploy` 10.3s 全程 `BelowNormal` | 目标笔记本低配 CPU 上的部署期打字延迟未实测 |
 
-**发现了但没有解决的**
+**已查清的发现（2026-11-19 自动化隔离测速，台式机）**
 
-- 服务端首键耗时取决于用户数据：用户的真实配置下新会话第一个按键 7.7–8.8ms，干净用户目录下 0.3ms；上屏一次 4–5ms。**没有查清是自定义词库（28MB）、用户词库（30MB）、`easy_en` 还是配置补丁造成的**（没有隔离）。
-- 每个按键先 `Echo` 一次（两次管道往返）；每次组字的第一个键约 11ms，其中约 6.5ms 在 `start_composition` 里 `start_ui` 之外，原因没查。
+- **用户词库/配置拖慢主因已查清**（`tools/perf/rime_firstkey_bench.cpp`，从只读备份复制到临时目录，不碰真实目录）：
+  - **之前误以为 `3.9–4.7ms` 是"空格上屏写用户词库"，实际空格只要 `0.08ms`**；真正花 `3.5–4.8ms` 的是打到 `nih`（`h` 键）时 `luna_pinyin_simp.custom.yaml` 里的 `translator/enable_correction: true`（相邻键纠错）。关掉这一项后，`h` 键从 `3.54–3.98ms` 降到 `0.57ms`（快 6.5 倍），整个 `nihao` 后台总耗时从 `7.78ms` 降到 `2.36ms`（-70%）。
+  - 30MB `luna_pinyin_simp.userdb` 几乎零拖慢（+0.05ms 以内）；`easy_en` 影响很小。
+  - `7.7–8.8ms` 的冷首键只在"最后一个会话被关闭后重新创建会话"（或服务端第 1 个会话 `s0`）时出现；只要同时还有其他活跃会话，新会话首键约 `1.5ms`（关纠错后 `0.9ms`）。
+- **WARP 下阴影高斯模糊单项开销已测出**（`tools/perf/ui_bench.cpp`）：`shadow_radius=0` 帧绘制 `0.19ms`，`shadow_radius=4/8/12` 为 `0.92 / 1.00 / 1.09ms`（约占整帧绘制 80%）。默认配置与用户的 `youtube` 配色已为 `shadow_radius: 0`。
+- **`start_composition` 里 `start_ui` 之外的约 6.5ms 来源（读代码）**：`Composition.cpp:57` `_UpdateCompositionWindow` 同步执行 `CGetTextExtentEditSession` → `_SetCompositionPosition` → `m_client.UpdateInputPosition`（同步 IPC）+ `MoveTo` + `_FlushPendingUI`。
+
+**发现了但还没有解决的**
+
 - 熔断期间本地结束组字时，服务端会话里的拼音是否残留：没有证据显示有，但实验有混淆因素，**没有排除**（见第 4 阶段的记录）。
 
-**没有做的**：第 3 阶段（服务端进程和维护线程的优先级）；"部署期间输入"和"睡眠唤醒后第一个字"两个场景的测量；目标笔记本上的任何测量；第 1 阶段要求的"系统性检查宿主进程里有没有加载显卡驱动 DLL"（只在记事本里观察到 `D3D10Warp.dll`）；阴影和模糊的单项开销；ETW 自身的开销；x86 宿主里的实测（x86 只验证了编译通过）。
+**没有做的**：目标笔记本上的全部实测（新程序第一个字、连续快速输入、部署期间输入、睡眠唤醒后第一个字）；第 1 阶段要求的"系统性检查宿主进程里有没有加载显卡驱动 DLL"（只在记事本里观察到 `D3D10Warp.dll`）；ETW 自身的开销；x86 宿主里的实测（x86 只验证了编译通过）；第 5 阶段剩余项（交换链只放大不缩小、字体回退、唤醒预热）等笔记本数据出来再决定。
 
 **本机（台式机）现状**
 
@@ -45,6 +55,97 @@
 3. 熔断探针的小优化（`Echo` 失败后若熔断已打开就直接返回）改动很小，没有做。
 
 **文档分工**：`AGENTS.md` 是规范、结构、已知踩坑；`README.md` 是写给普通用户的大白话；本文件是详细记录；`initial task.txt` 是顶层设计和各阶段的执行状态。
+
+---
+
+## 2026-11-19 · 第 3 阶段（进程/维护优先级）与第 5 阶段第 3 项（跳过每键 `Echo`）实施与自动验证
+
+**状态：方案经用户确认，代码已实施，x64 和 Win32 均编译通过（0 错误、0 新增警告），全自动验证全部通过；未提交。**
+
+### 1. 第 3 阶段：进程与维护线程调度优先级
+
+- 改动文件：
+  - `WeaselDeployer/WeaselDeployer.cpp:73-75`：`wmain` 入口设置 `BELOW_NORMAL_PRIORITY_CLASS`。
+  - `WeaselServer/WeaselServerApp.cpp:45-51`：`m_handler->Initialize()` 完成后，若当前为 `NORMAL_PRIORITY_CLASS` 则升至 `ABOVE_NORMAL_PRIORITY_CLASS`（不覆写显式以 Idle 启动的测试进程）。
+  - `RimeWithWeasel/RimeWithWeasel.cpp:114-143`：`start_maintenance(False)` + `join_maintenance_thread()` 期间用 RAII 守卫临时将进程优先级降至 `BELOW_NORMAL_PRIORITY_CLASS`（让 `rime.dll` 内部创建的维护线程自动继承低优先级），结束后自动恢复原优先级。
+- 自动化验证（临时干净用户目录，测完还原 `RimeUserDir` 并清理临时目录，不碰 `%APPDATA%\Rime`）：
+  - `WeaselServer.exe` 首次启动维护（约 10.8 秒）：全程 `BelowNormal`（0ms～10800ms），维护结束立刻升为 `AboveNormal`（11000ms）。
+  - `WeaselDeployer.exe /deploy` 全量部署（约 10.3 秒）：从 `Normal`（0ms）切至 `BelowNormal`（100ms～10300ms，`exit=0`）；部署完成后 `WeaselServer.exe` 保持 `AboveNormal`。
+
+### 2. 第 5 阶段第 3 项：连续按键跳过多余的 `Echo` 往返
+
+- 改动文件：
+  - `include/PipeChannel.h:29-39,169-171,208,271-277`：`ChannelContext` 新增 `reconnected` 标记和 `WasReconnected()`，在 `_Send()` 遇到断管并透明重连时置位。
+  - `include/WeaselIPC.h:152-156`、`WeaselIPC/WeaselClientImpl.h:33-34,47-48`、`WeaselIPC/WeaselClientImpl.cpp:10-14,57,66-70,166-180,349-424,504-511`：新增 `IsRecentlyAlive(maxAgeMs = 1000)` 与 `LastRequestFailed()`；仅在未发生断管重连且事务成功时刷新 `last_verified_tick`；若底层透明重连（服务端可能重启导致旧会话失效）则清空活跃时间戳并标记 `last_ipc_failed = true`。
+  - `WeaselTSF/WeaselTSF.h:136`、`WeaselTSF/WeaselTSF.cpp:249-259`：`_EnsureServerConnected(bool allowCached = false)` 在 `allowCached && m_client.IsRecentlyAlive(1000)` 时直接返回 `true`。
+  - `WeaselTSF/KeyEventSink.cpp:25,52-61`：按键路径传 `allowCached = true`；若 `ProcessKeyEvent` 后出现 `LastRequestFailed() && !Suspended()`，立即走完整 `_EnsureServerConnected(false)` 重建会话并重试该键一次（正常“不吞键”时 `LastRequestFailed()` 为 `false`，不触发重试）。
+- 自动化验证（`tools/perf/ipc_timeout_test.cpp` 扩展至 9 组 + `tools/perf/ipc_busy_test.cpp`）：
+  - `ipc_busy_test`：全忙探针 **109.5 ms**，PASS（exit=0）。
+  - `ipc_timeout_test`：9 组 32 项 **ALL PASSED（0 failures）**：
+    - 连续 100 键发送 **0 次 `Echo`**，100 键总 IPC 耗时 **10.40 ms → 5.76 ms（-44.6%）**；
+    - 正常不吞键：`LastRequestFailed() == false`，保持活跃；
+    - 空闲超过 1000ms 自动失效，下一次 `Echo` 重新刷新；
+    - 按键中途模拟服务端重启（强断管道 + 变更有效会话号）：客户端立即识别 `LastRequestFailed() == true`、重连建新会话并重试成功，**0 丢键**。
+
+### 3. 编译结果（低优先级，`/p:CL_MPCount=2 /m:1`）
+
+- x64 Release：通过，0 错误，0 新增警告。
+- Win32 Release：通过，0 错误，0 新增警告。
+
+---
+
+## 2026-11-19 · 自动化排查与低风险提速（词库隔离、阴影基准、探针收紧、排版文字测量缓存）
+
+**状态：代码改动已完成，x64 和 Win32 均编译通过（0 错误、0 新增警告），全自动测试全部通过；未提交，待用户确认后决定是否继续第 3 阶段和去 `Echo`。**
+
+### 1. 词库与配置隔离基准（纯只读排查，不动真实 `%APPDATA%\Rime`）
+
+- 新增工具：`tools/perf/rime_firstkey_bench.cpp`（直接链接 `lib64/rime.lib` + `output/rime.dll`，从只读备份 `C:\Users\Administrator\RimeBackup_20261119\Rime` 复制到临时目录跑 6 组隔离，测完删除临时目录）。
+- 实测结果（台式机，Idle 优先级，每组开 3～6 个并存会话，打 `n i h a o <space>`，单位 ms，取稳态会话 `s1..s2`）：
+
+| 对照组 | `n` | `i` | `h` | `a` | `o` | `SPC`（上屏） | 整词合计 |
+|---|---|---|---|---|---|---|---|
+| 干净标准词库（`case1_clean`） | 0.44 | 0.15 | 0.26 | 0.25 | 0.22 | 0.05 | 1.37 |
+| 干净 + 30MB `luna_pinyin_simp.userdb`（`case2_userdb`） | 0.34 | 0.15 | 0.28 | 0.23 | 0.20 | 0.05 | 1.25 |
+| 完整用户配置（`case3_full`） | 1.54 | 0.66 | **3.54** | 0.87 | 1.17 | 0.08 | **7.86** |
+| **完整配置仅关 `enable_correction`（`case4_no_corr`）** | 0.94 | 0.26 | **0.57** | 0.29 | 0.30 | 0.05 | **2.41** |
+| 完整配置仅去 `easy_en`（`case5_no_easyen`） | 1.52 | 0.61 | 3.98 | 0.86 | 1.27 | 0.07 | 8.31 |
+| 完整配置两项都关（`case6_no_both`） | 0.90 | 0.21 | 0.52 | 0.25 | 0.27 | 0.05 | 2.20 |
+
+- 结论：
+  1. **更正旧记录**：此前 `A4_cold.etl` 因 ETW 不记键码，把 `3.9–4.7ms` 误认为"空格上屏写用户词库"；实测空格仅 `0.08ms`，该延迟实际是 `nih`（`h` 键）触发 `translator/enable_correction: true` 的相邻键纠错搜索。关掉此项单词服务端总耗时降 70%。
+  2. 30MB 用户词库与 `easy_en` 均非主因。
+  3. 仅当最后一个会话关闭后重建（或服务端首个会话 `s0`）时，才付 `6–8.9ms` 一次性冷加载。
+
+### 2. 第 4 阶段收尾：探针失败短路与探针连接预算对齐
+
+- 改动文件：
+  - `WeaselTSF/WeaselTSF.cpp:255-260`：`Echo()` 失败后若 `m_client.Suspended()` 直接返回 `false`，不再继续调 `_Reconnect()` 多等一遍 250ms。
+  - `include/PipeChannel.h:53-58,170-189`、`WeaselIPC/PipeChannel.cpp:27-46`：`_Ensure` / `_Connect` 接受 `connectBudgetMs`（默认 250ms），`Transact(msg, timeoutMs)` 将连接预算钳到 `min(timeoutMs, 250)` 并与读写共享总预算。
+  - `tools/perf/ipc_busy_test.cpp:42-60`：增加"全管道实例繁忙时熔断探针必须遵守 ~100ms 预算"的自动断言。
+- 自动化验证：
+  - `ipc_busy_test`：全忙探针耗时 **107.7 ms**（旧版最坏 ~530ms），PASS（exit=0）。
+  - `ipc_timeout_test`：8 组 24 项全部 **ALL PASSED（0 failures）**，探针超时 109.0ms。
+
+### 3. 第 5 阶段：WARP 阴影基准 + 排版文字测量提速（`D2D::GetTextSize`）
+
+- 新增基准工具：`tools/perf/ui_bench.cpp`（离屏 WARP 阴影与 `GetTextSize` 等价性验证）、`tools/perf/layout_bench.cpp`（直接链接真实 `WeaselUI.lib` 测 `HorizontalLayout::DoLayout()` 并输出几何校验和）。
+- 阴影基准（台式机 WARP，560×110，100 帧）：`shadow_radius=0` **0.19ms** → `4` **0.92ms** → `8` **1.00ms** → `12` **1.09ms**（阴影模糊约占绘制耗时 80%）。
+- 改动文件：`WeaselUI/d2d.h:16,169-192`、`WeaselUI/d2d.cpp:129,420,485-488,546,679-767`：
+  - `D2D::GetTextSize` 改为复用同一个 `IDWriteTextLayout`（`SetMaxWidth`/`SetMaxHeight`），不再为查 `GetOverhangMetrics` 第二次 `CreateTextLayout`。
+  - 增加每 `D2D` 最多 256 项的 `textSizeCache`（以格式指针、方向标志、最大宽高、字符串为键；在 DPI 变化、字体/样式重初始化、格式缓存淘汰、设备重置时自动清空）。
+- 自动化 A/B 验证（真实 `WeaselUI.lib`，x64，台式机）：
+
+| 场景 | 改前 p50 / p95 | 改后 p50 / p95 | 变化 | 几何校验和 |
+|---|---|---|---|---|
+| `fresh`（50 组，每组 7 个全新汉字候选） | 1943.9 / 2402.7 µs | **676.5 / 779.2 µs** | **-65.2%（快 2.87 倍）** | `171692900` == `171692900` |
+| `typing`（300 次，`n→ni→nih→niha→nihao`） | 1713.3 / 1880.4 µs | **7.4 / 7.6 µs** | **-99.6%** | `877806480` == `877806480` |
+| `GetTextSize` 复用等价性（66 组样本×3 宽度） | — | — | **0 像素偏差** | — |
+
+### 4. 编译结果（低优先级，`/p:CL_MPCount=2 /m:1`）
+
+- x64 Release：通过，0 错误，0 新增警告。
+- Win32 Release：通过，0 错误，0 新增警告。
 
 ---
 
