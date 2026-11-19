@@ -242,6 +242,31 @@ x64、x86 均编译通过，0 错误。我改动的文件里没有新警告（`d
 
 局限：M3 是预热之前的构建，M4 是预热之后，所以 `start_ui`、`ui.create` 等不能直接比，这里只比较和预热无关的 `do_paint`。M4 里打了 8 个词，M3 是 6 个，次数不同。台式机上的数字，目标笔记本上没测，`D2D1Debug3.dll` 是否存在也没验证。
 
+**服务端首键 9ms 波动的拆解（台式机，场景 A 重做，`A4_cold.etl`）**
+
+先排除的假设：**服务端空闲时长**。对比各客户端第一个真实按键与服务端前一次调用的间隔：A2 里间隔 586ms 的进程要 10.4ms，间隔 572ms 的只要 2.4ms；A3 里间隔 0.5–3.3 秒不等，全是 8–10ms。没有相关性。客户端往返耗时（`tsf.ipc_key_roundtrip`）几乎等于服务端 `srv.on_key_event`（如 9875 对 9744µs），所以波动在服务端。
+
+新增计时点（只加计时，`RimeWithWeasel/RimeWithWeasel.cpp` 的 `ProcessKeyEvent`，6 行）：`srv.rime.process_key`（librime）、`srv.rime.vim_check`、`srv.rime.respond`（`_Respond`，序列化）、`srv.rime.update_ui`（`_UpdateUI`）。
+
+| 按键 | 总耗时 | `process_key`（librime） | `respond` | `update_ui` |
+|---|---|---|---|---|
+| 每个新进程的第一个真实按键（5 个进程） | 8.5–9.7 ms | **7.7–8.8 ms** | 0.8 ms | 0.04 ms |
+| 空格（上屏） | 4.8–5.6 ms | **3.9–4.7 ms** | 0.8 ms | 0.04 ms |
+| 所有按键中位数 | 0.64 ms | 0.022 ms | 0.57 ms | 0.039 ms |
+
+结论：
+
+1. **首键的 9ms 几乎全在 librime 的 `process_key` 里**（7.7–8.8ms），我们自己的代码（序列化 0.8ms、服务端界面 0.04ms）只占零头。
+2. **慢的是"新会话的第一个真实按键"，不是"每次组字的第一个按键"**。同一个进程连续打词（`M4_multi.etl`）：第一个按键 9.7ms，之后每个新词的第一个按键约 2ms，上屏的空格约 3.9–5.1ms。每个新进程会创建新的 librime 会话，所以每个新进程都付一次。
+3. **上屏（空格）一次要 4–5ms**，每个词都要付，也在 `process_key` 里。可能和写用户词库有关，**未验证**。
+4. 偶发尖峰：M4 里服务端有一次 26.9ms、一次 11.6ms 的按键，原因没查。
+5. librime 内部具体慢在哪**没有查清**。本机环境供参考：当前方案是 `luna_pinyin_simp`（+ `easy_en`），`luna_pinyin.my.table.bin` 28MB、`easy_en.table.bin` 15MB，`luna_pinyin_simp.userdb` 30.3MB（leveldb）。台式机有 NVMe SSD；目标笔记本的磁盘更慢，这个首键延迟可能更大，**没测**。librime 源码子模块没有初始化（本项目用预编译的 `rime.dll` 和 `rime.pdb`）。
+
+可选的下一步（均未做）：
+- 用 WPR 对服务端做 CPU 采样，结合 `rime.pdb` 看首键的调用栈（最直接，需要配置符号）。
+- 用只装 `luna_pinyin` 的临时用户目录做对照（和之前验证 ETW 时一样改 `RimeUserDir`），看首键耗时是否随词库、用户词库大小变化。
+- 在服务端创建会话后、用户按第一个键之前，先喂一个无害按键预热。**会引入服务端并发和会话状态问题，属于 `AGENTS.md` 要求先出方案的高风险改动，没有做。**
+
 **还没验证的**
 
 1. 目标笔记本上的焦点卡顿（`tsf.prewarm_graphics`）和首键延迟没测。

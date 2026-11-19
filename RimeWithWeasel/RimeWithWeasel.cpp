@@ -4,6 +4,7 @@
 #include <WeaselConstants.h>
 #include <WeaselStyleColor.h>
 #include <WeaselUtility.h>
+#include <WeaselPerf.h>
 
 #include <filesystem>
 #include <map>
@@ -270,9 +271,11 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
              << ", mask = " << keyEvent.mask << ", ipc_id = " << ipc_id;
   if (m_disabled)
     return FALSE;
+  LONGLONG perf_lap = weasel::perf::Mark();
   RimeSessionId session_id = to_session_id(ipc_id);
   Bool handled = rime_api->process_key(session_id, keyEvent.keycode,
                                        expand_ibus_modifier(keyEvent.mask));
+  weasel::perf::Lap("srv.rime.process_key", perf_lap);
   // vim_mode when keydown only
   if (!handled && !(keyEvent.mask & ibus::Modifier::RELEASE_MASK)) {
     bool isVimBackInCommandMode =
@@ -287,8 +290,11 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       rime_api->set_option(session_id, "ascii_mode", True);
     }
   }
+  weasel::perf::Lap("srv.rime.vim_check", perf_lap);
   _Respond(ipc_id, eat);
+  weasel::perf::Lap("srv.rime.respond", perf_lap);
   _UpdateUI(ipc_id);
+  weasel::perf::Lap("srv.rime.update_ui", perf_lap);
   m_active_session = ipc_id;
   return (BOOL)handled;
 }
