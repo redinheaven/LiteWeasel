@@ -267,6 +267,29 @@ x64、x86 均编译通过，0 错误。我改动的文件里没有新警告（`d
 - 用只装 `luna_pinyin` 的临时用户目录做对照（和之前验证 ETW 时一样改 `RimeUserDir`），看首键耗时是否随词库、用户词库大小变化。
 - 在服务端创建会话后、用户按第一个键之前，先喂一个无害按键预热。**会引入服务端并发和会话状态问题，属于 `AGENTS.md` 要求先出方案的高风险改动，没有做。**
 
+**服务端首键耗时与用户数据的关系（干净用户目录对照，`A5_testdir.etl` 对比 `A4_cold.etl`，台式机）**
+
+方法：停掉服务端，临时把 `HKCU\Software\Rime\Weasel\RimeUserDir` 指向空目录 `C:\Users\Administrator\lwtest_rime`（`default.custom.yaml` 里只留 `luna_pinyin_simp`），用 Idle 优先级启动服务端让它自己部署，再做场景 A（5 个新记事本进程，各打 `nihao`+空格）。完成后恢复 `RimeUserDir`、删除测试目录、用原配置重启服务端。
+
+| 对照 | 新进程第一个真实按键的 `srv.rime.process_key` | 上屏（空格）一次 |
+|---|---|---|
+| 真实目录（A4，服务端 Normal 优先级，28MB 自定义词库 + 30MB 用户词库 + `easy_en`） | **7.7–8.8 ms**，5 个进程都慢 | 3.9–4.7 ms |
+| 干净目录（A5，服务端 Idle 优先级，标准 `luna_pinyin` 13MB 表，空用户词库） | **0.30–0.34 ms**，5 个进程里 5 个都快 | 没有超过 3ms 的 |
+| A5 里服务端启动后的第一个会话 | 5.9 ms（一次性，之后消失） | — |
+
+结论：
+
+1. **首键 9ms 和上屏 4–5ms 取决于用户的词库/配置，不是 librime 的固定开销。** A5 的服务端是 Idle 优先级，只会让耗时偏高，所以真实差异不会比这里更小。
+2. **没有证明是哪一样造成的。** 这次同时换掉了：28MB 自定义词库 `luna_pinyin.my` 与标准词库、30MB 用户词库 `luna_pinyin_simp.userdb` 与空用户词库、`easy_en`（15MB 表）、`*.custom.yaml` 里可能有的补丁或脚本。
+3. 没有解释为什么真实配置下**每个新会话**都要付一次，而干净配置下只有服务端的第一个会话付。
+4. 台式机是 NVMe SSD，目标笔记本磁盘更慢，真实配置下这个延迟可能更大，没测。
+
+建议的下一步对照（未做）：干净目录里**只加入备份中的 `luna_pinyin_simp.userdb`**（从备份复制，不碰真实目录）；首键回到 8ms 就是用户词库，否则再依次加自定义词库和 `easy_en`。
+
+**对用户真实目录 `%APPDATA%\Rime` 的影响（必须记录）**
+
+本机装了我们的新版（`rime.dll` 2026-06，官方 0.17.4 自带的是 2025-02）后，服务端第一次用真实目录启动时重新部署了 `build/`：`build/` 下的 `default.yaml`、`easy_en.schema.yaml`、`luna_pinyin_simp.schema.yaml`、`luna_pinyin.my.table.bin`、`luna_pinyin.my.reverse.bin`、`stroke.*`、`weasel.yaml` 与备份不同；`installation.yaml`、`user.yaml`（程序自己记录状态的文件）也变了。用户自己写的配置（其余顶层文件）逐个比哈希，没有变化；用户词库总大小一致（30.31MB，文件名变化是 leveldb 正常压缩）；备份 `C:\Users\Administrator\RimeBackup_20261119` 完整保留。目录总大小 267.55MB → 270.63MB，文件数 116 → 115（leveldb 日志文件轮换）。装回官方旧版 `rime.dll` 时会再部署一次，旧版能否直接读新版生成的 `build/` 没有验证。
+
 **还没验证的**
 
 1. 目标笔记本上的焦点卡顿（`tsf.prewarm_graphics`）和首键延迟没测。
