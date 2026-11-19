@@ -70,6 +70,10 @@ int wmain(int argc, wchar_t* argv[]) {
     DetachGuiConsole();
   }
 
+  // Keep deployment / dictionary maintenance below normal priority so it does
+  // not starve foreground apps or typing on low-power CPUs.
+  SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+
   HINSTANCE hInstance = GetModuleHandle(NULL);
   LoadWeaselLogLevelFromRegistry();
   SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);

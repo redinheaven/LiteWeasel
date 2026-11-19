@@ -1,11 +1,17 @@
 ﻿#include "stdafx.h"
 #include "WeaselClientImpl.h"
 #include <StringAlgorithm.hpp>
+#include <WeaselPerf.h>
+#include <atomic>
 
 using namespace weasel;
 
 ClientImpl::ClientImpl()
-    : session_id(0), channel(GetPipeName()), is_ime(false) {
+    : session_id(0),
+      is_ime(false),
+      last_verified_tick(0),
+      last_ipc_failed(false),
+      channel(GetPipeName()) {
   _InitializeClientInfo();
 }
 
@@ -48,6 +54,7 @@ bool ClientImpl::Connect(ServerLauncher const& launcher) {
 void ClientImpl::Disconnect() {
   if (_Active())
     EndSession();
+  last_verified_tick = 0;
   channel.Disconnect();
 }
 
@@ -56,8 +63,10 @@ void ClientImpl::ShutdownServer() {
 }
 
 bool ClientImpl::ProcessKeyEvent(KeyEvent const& keyEvent) {
-  if (!_Active())
+  if (!_Active()) {
+    last_ipc_failed = true;
     return false;
+  }
 
   LRESULT ret =
       _SendMessage(WEASEL_IPC_PROCESS_KEY_EVENT, keyEvent, session_id);
@@ -154,20 +163,26 @@ void ClientImpl::StartSession() {
 void ClientImpl::EndSession() {
   _SendMessage(WEASEL_IPC_END_SESSION, 0, session_id);
   session_id = 0;
+  last_verified_tick = 0;
 }
 
 void ClientImpl::StartMaintenance() {
   _SendMessage(WEASEL_IPC_START_MAINTENANCE, 0, 0);
   session_id = 0;
+  last_verified_tick = 0;
 }
 
 void ClientImpl::EndMaintenance() {
   _SendMessage(WEASEL_IPC_END_MAINTENANCE, 0, 0);
   session_id = 0;
+  last_verified_tick = 0;
 }
 
 bool ClientImpl::Echo() {
-  if (!_Active())
+  // Only a session id is required here, not an open pipe: after a timeout the
+  // pipe is closed, and Echo is the probe that reconnects it (Transact does
+  // that) and checks that the server still knows this session.
+  if (session_id == 0)
     return false;
 
   UINT serverEcho = _SendMessage(WEASEL_IPC_ECHO, 0, session_id);
@@ -190,14 +205,212 @@ bool ClientImpl::_WriteClientInfo() {
   return true;
 }
 
+// How long a request may take before the client gives up on the server. This
+// runs on host-application threads (often the UI thread), so it must be
+// bounded. The values are well above what the server needs normally (a key
+// event takes about 1 ms, p95 about 5 ms, 97 ms at worst in our traces).
+static DWORD TimeoutFor(WEASEL_IPC_COMMAND msg) {
+  switch (msg) {
+    // These can legitimately take a long time (the server redeploys / shuts
+    // down while handling them), and their callers (WeaselDeployer, the
+    // tray) are not input-method hosts.
+    case WEASEL_IPC_START_MAINTENANCE:
+    case WEASEL_IPC_END_MAINTENANCE:
+    case WEASEL_IPC_SHUTDOWN_SERVER:
+    case WEASEL_IPC_TRAY_COMMAND:
+      return INFINITE;
+    // Creating a session can involve loading a schema.
+    case WEASEL_IPC_START_SESSION:
+      return 1000;
+    default:
+      return 250;
+  }
+}
+
+static const char* PerfNameFor(WEASEL_IPC_COMMAND msg) {
+  switch (msg) {
+    case WEASEL_IPC_ECHO:
+      return "ipc.echo";
+    case WEASEL_IPC_PROCESS_KEY_EVENT:
+      return "ipc.key";
+    case WEASEL_IPC_START_SESSION:
+      return "ipc.start_session";
+    default:
+      return "ipc.other";
+  }
+}
+
+// Process-wide circuit breaker for the server connection.
+//
+// A hung server makes every request wait for its full timeout, and a host
+// types many keys per second, so without this each key would stall the host
+// thread again. After kTrip consecutive "unresponsive" failures (a timeout, or
+// all pipe instances staying busy) within kWindowMs the breaker opens: for
+// the open period every guarded request fails immediately and the keys go
+// straight to the application. After the period one request is let through as
+// a probe with a short timeout; success closes the breaker, failure doubles
+// the open period (up to kMaxOpenMs). A server that is simply not running is
+// NOT a hang; it does not trip the breaker, so the TSF's own relaunch logic
+// keeps working.
+namespace {
+constexpr DWORD kBaseOpenMs = 3000;
+constexpr DWORD kMaxOpenMs = 30000;
+constexpr ULONGLONG kWindowMs = 2000;
+constexpr int kTrip = 2;
+constexpr DWORD kProbeTimeoutMs = 100;
+
+class CircuitBreaker {
+ public:
+  enum class Verdict { Pass, Probe, Block };
+
+  Verdict Enter() {
+    const ULONGLONG until = open_until_.load();
+    if (until == 0)
+      return Verdict::Pass;
+    if (::GetTickCount64() < until)
+      return Verdict::Block;
+    // Open period over: exactly one caller becomes the probe.
+    return probe_in_flight_.exchange(true) ? Verdict::Block : Verdict::Probe;
+  }
+
+  // True while requests would be refused (open, or waiting for the probe).
+  bool Suspended() const {
+    const ULONGLONG until = open_until_.load();
+    return until != 0 &&
+           (::GetTickCount64() < until || probe_in_flight_.load());
+  }
+
+  void Success() {
+    if (open_until_.load() == 0 && failures_.load() == 0)
+      return;  // common case: nothing to reset
+    const bool was_open = open_until_.exchange(0) != 0;
+    failures_ = 0;
+    backoff_ms_ = kBaseOpenMs;
+    probe_in_flight_ = false;
+    if (was_open)
+      weasel::perf::EmitValue("ipc.breaker.close", 0);
+  }
+
+  // The server did not answer in time.
+  void Unresponsive(bool probe) {
+    const ULONGLONG now = ::GetTickCount64();
+    if (probe) {
+      DWORD next = backoff_ms_.load() * 2;
+      if (next > kMaxOpenMs)
+        next = kMaxOpenMs;
+      backoff_ms_ = next;
+      open_until_ = now + next;
+      probe_in_flight_ = false;
+      weasel::perf::EmitValue("ipc.breaker.probe_failed",
+                              static_cast<INT64>(next) * 1000);
+      return;
+    }
+    if (failures_.load() == 0 || now - first_failure_.load() > kWindowMs) {
+      failures_ = 1;
+      first_failure_ = now;
+    } else {
+      ++failures_;
+    }
+    if (failures_.load() >= kTrip) {
+      failures_ = 0;
+      open_until_ = now + backoff_ms_.load();
+      probe_in_flight_ = false;
+      weasel::perf::EmitValue("ipc.breaker.open",
+                              static_cast<INT64>(backoff_ms_.load()) * 1000);
+    }
+  }
+
+  // The request failed for another reason (no server, broken pipe, ...). That
+  // is not a hang: leave the decision to the caller's reconnect logic.
+  void Gone() {
+    failures_ = 0;
+    const bool was_open = open_until_.exchange(0) != 0;
+    backoff_ms_ = kBaseOpenMs;
+    probe_in_flight_ = false;
+    if (was_open)
+      weasel::perf::EmitValue("ipc.breaker.close", 0);
+  }
+
+ private:
+  std::atomic<ULONGLONG> open_until_{0};  // 0 = closed
+  std::atomic<bool> probe_in_flight_{false};
+  std::atomic<DWORD> backoff_ms_{kBaseOpenMs};
+  std::atomic<int> failures_{0};
+  std::atomic<ULONGLONG> first_failure_{0};
+};
+
+CircuitBreaker g_breaker;
+}  // namespace
+
+bool ClientImpl::Suspended() {
+  return g_breaker.Suspended();
+}
+
+bool ClientImpl::IsRecentlyAlive(DWORD maxAgeMs) const {
+  if (g_breaker.Suspended() || !_Active() || last_verified_tick == 0)
+    return false;
+  return (::GetTickCount64() - last_verified_tick) < maxAgeMs;
+}
+
 LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
                                  DWORD wParam,
                                  DWORD lParam) {
+  WEASEL_PERF_SCOPE(PerfNameFor(Msg));
+  last_ipc_failed = false;
+  DWORD timeout = TimeoutFor(Msg);
+  // Only requests with a bounded timeout (the input-method path) are guarded.
+  const bool guarded = timeout != INFINITE;
+  CircuitBreaker::Verdict verdict = CircuitBreaker::Verdict::Pass;
+  if (guarded) {
+    verdict = g_breaker.Enter();
+    if (verdict == CircuitBreaker::Verdict::Block) {
+      last_ipc_failed = true;
+      last_verified_tick = 0;
+      return 0;
+    }
+    if (verdict == CircuitBreaker::Verdict::Probe && timeout > kProbeTimeoutMs)
+      timeout = kProbeTimeoutMs;
+  }
+  const bool probe = verdict == CircuitBreaker::Verdict::Probe;
   try {
     PipeMessage req{Msg, wParam, lParam};
-    return channel.Transact(req);
-  } catch (DWORD /* ex */) {
+    LRESULT result = channel.Transact(req, timeout);
+    if (guarded)
+      g_breaker.Success();
+    if (channel.WasReconnected()) {
+      // The underlying pipe broke and transparently reconnected (e.g. server
+      // restarted). The server may no longer know our session_id, so invalidate
+      // freshness and ask the caller to re-verify / recreate the session.
+      last_verified_tick = 0;
+      if (Msg != WEASEL_IPC_ECHO && Msg != WEASEL_IPC_START_SESSION)
+        last_ipc_failed = true;
+    } else if (Msg == WEASEL_IPC_ECHO) {
+      last_verified_tick =
+          (session_id != 0 && static_cast<UINT>(result) == session_id)
+              ? ::GetTickCount64()
+              : 0;
+    } else if (Msg == WEASEL_IPC_START_SESSION) {
+      last_verified_tick = (result != 0) ? ::GetTickCount64() : 0;
+    } else if (guarded) {
+      last_verified_tick = ::GetTickCount64();
+    }
+    return result;
+  } catch (DWORD err) {
+    last_ipc_failed = true;
+    last_verified_tick = 0;
+    if (guarded) {
+      if (err == ERROR_TIMEOUT)
+        g_breaker.Unresponsive(probe);
+      else
+        g_breaker.Gone();
+    }
     return 0;
+  } catch (...) {
+    last_ipc_failed = true;
+    last_verified_tick = 0;
+    if (guarded)
+      g_breaker.Gone();  // never leave a probe flag set
+    throw;
   }
 }
 
@@ -282,4 +495,16 @@ bool Client::Echo() {
 
 bool Client::GetResponseData(ResponseHandler handler) {
   return m_pImpl->GetResponseData(handler);
+}
+
+bool Client::Suspended() const {
+  return ClientImpl::Suspended();
+}
+
+bool Client::IsRecentlyAlive(DWORD maxAgeMs) const {
+  return m_pImpl->IsRecentlyAlive(maxAgeMs);
+}
+
+bool Client::LastRequestFailed() const {
+  return m_pImpl->LastRequestFailed();
 }

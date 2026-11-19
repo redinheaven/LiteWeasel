@@ -133,7 +133,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   void _HandleLangBarMenuSelect(UINT wID);
 
   /* IPC */
-  bool _EnsureServerConnected();
+  bool _EnsureServerConnected(bool allowCached = false);
 
   /* UI */
   void _UpdateUI(const weasel::Context& ctx, const weasel::Status& status);

@@ -2,6 +2,7 @@
 #include <WeaselIPC.h>
 #include <WeaselUI.h>
 #include <map>
+#include <set>
 #include <string>
 #include <mutex>
 
@@ -125,5 +126,8 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool m_current_dark_mode;
   bool m_global_ascii_mode;
   int m_show_notifications_time;
+  int m_max_input_length;
+  int m_slow_key_ms;
+  std::set<WeaselSessionId> m_slow_sessions;
   DWORD m_pid;
 };

@@ -2,6 +2,7 @@
 #include "WeaselIPC.h"
 #include "WeaselTSF.h"
 #include <KeyEvent.h>
+#include <WeaselPerf.h>
 #include "CandidateList.h"
 
 static weasel::KeyEvent prevKeyEvent;
@@ -9,6 +10,7 @@ static BOOL prevfEaten = FALSE;
 static int keyCountToSimulate = 0;
 
 void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
+  WEASEL_PERF_SCOPE("tsf.process_key");
   // when _IsKeyboardDisabled don't eat the key,
   // when keyboard closable and keyboard closed, don't eat the key
   if ((_isToOpenClose && !_IsKeyboardOpen()) || _IsKeyboardDisabled()) {
@@ -17,8 +19,18 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
   }
 
   // if server connection is Not OK, don't eat it.
-  if (!_EnsureServerConnected()) {
+  bool server_ok;
+  {
+    WEASEL_PERF_SCOPE("tsf.ensure_server");
+    server_ok = _EnsureServerConnected(/*allowCached=*/true);
+  }
+  if (!server_ok) {
     *pfEaten = FALSE;
+    // The server is not answering: drop the composition that is still on
+    // screen (its state lives in the server), instead of leaving a stale
+    // candidate window while the keys go to the application.
+    if (m_client.Suspended() && _IsComposing())
+      _AbortComposition();
     return;
   }
   weasel::KeyEvent ke;
@@ -34,8 +46,20 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
       else if (ke.keycode == ibus::Down)
         ke.keycode = ibus::Up;
     }
-    if (!keyCountToSimulate)
+    if (!keyCountToSimulate) {
+      WEASEL_PERF_SCOPE("tsf.ipc_key_roundtrip");
       *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
+      // If we skipped Echo and the server died or restarted in that window,
+      // re-verify/recreate the session once and retry this key so it is not
+      // dropped. (Normal "key not eaten" leaves LastRequestFailed() == false.)
+      if (m_client.LastRequestFailed() && !m_client.Suspended()) {
+        if (_EnsureServerConnected(/*allowCached=*/false)) {
+          *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
+        } else if (m_client.Suspended() && _IsComposing()) {
+          _AbortComposition();
+        }
+      }
+    }
 
     if (ke.keycode == ibus::Caps_Lock) {
       if (prevKeyEvent.keycode == ibus::Caps_Lock && prevfEaten == TRUE &&

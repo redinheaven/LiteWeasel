@@ -65,4 +65,10 @@ class UI {
   bool in_server_;
   UICallbackFunc _uiCallback;
 };
+
+// Creates the process-wide graphics device resources (D3D11 WARP device,
+// Direct2D / DirectComposition / DirectWrite factories) ahead of the first
+// candidate window, so the first composition does not have to pay for it.
+// Safe to call repeatedly and from several threads.
+HRESULT PrewarmGraphics();
 }  // namespace weasel

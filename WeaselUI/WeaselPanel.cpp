@@ -1,4 +1,5 @@
 #include "WeaselPanel.h"
+#include <WeaselPerf.h>
 #include "FullScreenLayout.h"
 #include "HorizontalLayout.h"
 #include "VHorizontalLayout.h"
@@ -300,12 +301,16 @@ void WeaselPanel::_UpdateHideCandidates() {
 void WeaselPanel::Refresh() {
   if (!m_hWnd)
     return;
+  WEASEL_PERF_SCOPE("ui.refresh");
+  LONGLONG perf_lap = weasel::perf::Mark();
   if (!m_pD2D)
     m_pD2D = std::make_shared<D2D>(m_style);
   m_pD2D->AttachWindow(m_hWnd);
+  weasel::perf::Lap("ui.refresh.d2d_attach", perf_lap);
   if (!m_style.font_face.empty() &&
       (m_ostyle != m_style || !m_pD2D->pTextFormat))
     m_pD2D->InitDirectWriteResources();
+  weasel::perf::Lap("ui.refresh.dwrite_init", perf_lap);
   m_ostyle = m_style;
   _UpdateHideCandidates();
   auto hr = m_pD2D->direct3dDevice
@@ -319,14 +324,18 @@ void WeaselPanel::Refresh() {
   }
   _CreateLayout();
   m_layout->DoLayout();
+  weasel::perf::Lap("ui.refresh.layout", perf_lap);
   _ResizeWindow();
+  weasel::perf::Lap("ui.refresh.resize", perf_lap);
   if (m_preview_mode) {
     if (!m_preview_positioned && !m_preview_detached)
       RepositionPreview();
   } else {
     _Reposition();
   }
+  weasel::perf::Lap("ui.refresh.reposition", perf_lap);
   RedrawWindow();
+  weasel::perf::Lap("ui.refresh.redraw", perf_lap);
 }
 
 void WeaselPanel::RepositionPreview() {
@@ -349,6 +358,8 @@ void WeaselPanel::RepositionPreview() {
 BOOL WeaselPanel::Create(HWND parent, bool preview_mode) {
   if (m_hWnd)
     return !!m_hWnd;
+  WEASEL_PERF_SCOPE("ui.create");
+  LONGLONG perf_lap = weasel::perf::Mark();
   m_parent = parent;
   m_preview_mode = preview_mode;
   m_preview_positioned = false;
@@ -377,14 +388,18 @@ BOOL WeaselPanel::Create(HWND parent, bool preview_mode) {
   m_hWnd = CreateWindowEx(
       ex_style, L"WeaselPanel", L"WeaselPanel", WS_POPUP | WS_CLIPSIBLINGS,
       CW_USEDEFAULT, CW_USEDEFAULT, 10, 10, parent, nullptr, hInstance, this);
+  weasel::perf::Lap("ui.create.window", perf_lap);
   if (m_hWnd) {
     if (!m_pD2D) {
       DEBUG << "m_style.font_face: " << m_style.font_face;
       m_pD2D = std::make_shared<D2D>(m_style);
     }
+    weasel::perf::Lap("ui.create.d2d_ctor", perf_lap);
     m_pD2D->AttachWindow(m_hWnd);
+    weasel::perf::Lap("ui.create.attach", perf_lap);
     if (!m_style.font_face.empty())
       m_pD2D->InitDirectWriteResources();
+    weasel::perf::Lap("ui.create.dwrite_init", perf_lap);
     m_ostyle = m_style;
   }
   return !!m_hWnd;
@@ -421,6 +436,7 @@ void WeaselPanel::_UpdateOffsetY(CRect& arc, CRect& prc) {
 }
 
 void WeaselPanel::DoPaint() {
+  WEASEL_PERF_SCOPE("ui.do_paint");
   if (!m_pD2D || !m_layout || !m_pD2D->dc || !m_pD2D->swapChain)
     return;
   auto hr = m_pD2D->direct3dDevice
@@ -495,7 +511,11 @@ void WeaselPanel::DoPaint() {
     return;
   }
   // Make the swap chain available to the composition engine
-  HRESULT hrPresent = m_pD2D->swapChain->Present(1, 0);  // sync
+  HRESULT hrPresent;
+  {
+    WEASEL_PERF_SCOPE("ui.present");
+    hrPresent = m_pD2D->swapChain->Present(1, 0);  // sync
+  }
   if (hrPresent == DXGI_ERROR_DEVICE_REMOVED ||
       hrPresent == DXGI_ERROR_DEVICE_RESET) {
     DEBUG << "Device lost during Present: " << HRESULTToString(hrPresent);

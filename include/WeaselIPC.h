@@ -146,6 +146,14 @@ class Client {
   void TrayCommand(UINT menuId);
   // 读取server返回的数据
   bool GetResponseData(ResponseHandler handler);
+  // 服务端无响应（熔断器打开）时为 true：请求会立即失败，按键应直接放行。
+  // 对整个进程生效。
+  bool Suspended() const;
+  // 管道仍连接、会话有效、未熔断，且距离上次成功通信未超过 maxAgeMs 时为 true。
+  // 可用于在连续按键期间跳过每键多余的 Echo 探测。
+  bool IsRecentlyAlive(DWORD maxAgeMs = 1000) const;
+  // 上一次 IPC 请求是否因通信失败或底层管道重连而需要重新校验会话。
+  bool LastRequestFailed() const;
 
  private:
   ClientImpl* m_pImpl;

@@ -16,6 +16,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <WeaselUtility.h>
 
@@ -168,6 +169,28 @@ struct D2D {
   static constexpr size_t kMaxTextFormatCacheEntries = 32;
   std::map<std::wstring, CachedTextFormat> textFormatCache;
   uint64_t textFormatCacheClock = 0;
+
+  struct TextSizeKey {
+    const void* format;
+    int max_dim;
+    uint8_t flags;  // bit 0: vertical_text_layout, bit 1: vertical_ltr
+    std::wstring text;
+    bool operator==(const TextSizeKey& o) const {
+      return format == o.format && max_dim == o.max_dim && flags == o.flags &&
+             text == o.text;
+    }
+  };
+  struct TextSizeKeyHash {
+    size_t operator()(const TextSizeKey& k) const {
+      size_t h = std::hash<const void*>()(k.format);
+      h ^= std::hash<int>()(k.max_dim) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= std::hash<uint8_t>()(k.flags) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= std::hash<std::wstring>()(k.text) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      return h;
+    }
+  };
+  static constexpr size_t kMaxTextSizeCacheEntries = 256;
+  std::unordered_map<TextSizeKey, SIZE, TextSizeKeyHash> textSizeCache;
   std::mutex cacheMutex;
   // clear caches that depend on device/context
   void ClearDeviceDependentCaches();

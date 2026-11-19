@@ -1,9 +1,11 @@
 #include "d2d.h"
+#include <WeaselPerf.h>
 #include <Dwmapi.h>
 #include <ShellScalingApi.h>
 #include <VersionHelpers.hpp>
 #include <wincodec.h>
 #include <algorithm>
+#include <mutex>
 #include <regex>
 
 #pragma comment(lib, "dxguid.lib")
@@ -18,6 +20,12 @@ UINT GetDpiForWindowCompat(HWND hwnd) {
       GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
   return pGetDpiForWindow ? pGetDpiForWindow(hwnd) : 0;
 }
+
+// Guards DeviceResources::EnsureInitialized() / Reset().
+std::mutex& DeviceResourcesMutex() {
+  static std::mutex m;
+  return m;
+}
 }  // namespace
 
 // DeviceResources implementation moved from cpp to header; provide definitions
@@ -30,8 +38,13 @@ DeviceResources& DeviceResources::Get() {
 DeviceResources::DeviceResources() : initialized(false) {}
 
 HRESULT DeviceResources::EnsureInitialized() {
+  // Prewarming (WeaselUI.cpp: PrewarmGraphics) may race with the first window
+  // creation when several TSF threads of one host process get focus.
+  std::lock_guard<std::mutex> lock(DeviceResourcesMutex());
   if (initialized)
     return S_OK;
+  WEASEL_PERF_SCOPE("ui.device_init");
+  LONGLONG perf_lap = weasel::perf::Mark();
   HRESULT hr = S_OK;
   // Prefer WARP to avoid loading the host process's hardware graphics driver.
   static const D3D_FEATURE_LEVEL featureLevels[] = {
@@ -56,6 +69,7 @@ HRESULT DeviceResources::EnsureInitialized() {
       return hr;
     }
   }
+  weasel::perf::Lap("ui.device_init.d3d11", perf_lap);
   hr = direct3dDevice.As(&dxgiDevice);
   if (FAILED(hr))
     return hr;
@@ -64,7 +78,7 @@ HRESULT DeviceResources::EnsureInitialized() {
       reinterpret_cast<void**>(dxFactory.ReleaseAndGetAddressOf()));
   if (FAILED(hr))
     return hr;
-  D2D1_FACTORY_OPTIONS const options = {D2D1_DEBUG_LEVEL_INFORMATION};
+  D2D1_FACTORY_OPTIONS const options = {D2D1_DEBUG_LEVEL_NONE};
   hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, options,
                          d2Factory.ReleaseAndGetAddressOf());
   if (FAILED(hr))
@@ -78,6 +92,7 @@ HRESULT DeviceResources::EnsureInitialized() {
       reinterpret_cast<void**>(dcompDevice.ReleaseAndGetAddressOf()));
   if (FAILED(hr))
     return hr;
+  weasel::perf::Lap("ui.device_init.dxgi_d2d_dcomp", perf_lap);
   hr = DWriteCreateFactory(
       DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
       reinterpret_cast<IUnknown**>(m_pWriteFactory.ReleaseAndGetAddressOf()));
@@ -87,11 +102,13 @@ HRESULT DeviceResources::EnsureInitialized() {
                         IID_PPV_ARGS(wicFactory.ReleaseAndGetAddressOf()));
   if (FAILED(hr))
     return hr;
+  weasel::perf::Lap("ui.device_init.dwrite_wic", perf_lap);
   initialized = true;
   return S_OK;
 }
 
 void DeviceResources::Reset() {
+  std::lock_guard<std::mutex> lock(DeviceResourcesMutex());
   // release shared device resources so they can be recreated
   SafeReleaseAll(direct3dDevice, dxgiDevice, dxFactory, d2Factory, d2Device,
                  dcompDevice, m_pWriteFactory, wicFactory);
@@ -109,6 +126,7 @@ void D2D::ClearDeviceDependentCaches() {
     }
     textFormatCache.clear();
     textFormatCacheClock = 0;
+    textSizeCache.clear();
   }
 }
 
@@ -399,6 +417,7 @@ PtTextFormat D2D::GetOrCreateTextFormat(const std::wstring& face,
               return lhs.second.last_used < rhs.second.last_used;
             });
         textFormatCache.erase(oldest);
+        textSizeCache.clear();
       }
       textFormatCache[key] = {pFormat, ++textFormatCacheClock};
     }
@@ -467,6 +486,10 @@ void D2D::InitFontFormats(const wstring& label_font_face,
       GetOrCreateTextFormat(label_font_face, label_font_point, wrapping);
   pCommentFormat =
       GetOrCreateTextFormat(comment_font_face, comment_font_point, wrapping);
+  {
+    std::lock_guard<std::mutex> lk(cacheMutex);
+    textSizeCache.clear();
+  }
 }
 
 void D2D::InitDirectWriteResources() {
@@ -521,6 +544,7 @@ void D2D::InitDpiInfo() {
     std::lock_guard<std::mutex> lk(cacheMutex);
     textFormatCache.clear();
     textFormatCacheClock = 0;
+    textSizeCache.clear();
     pPreeditFormat.Reset();
     pTextFormat.Reset();
     pLabelFormat.Reset();
@@ -664,24 +688,43 @@ void D2D::GetTextSize(const wstring& text,
     lpSize->cy = 0;
     return;
   }
-  ComPtr<IDWriteTextLayout> pTextLayout;
-  bool vertical_text_layout =
+  const size_t clampedCount = (nCount <= text.size()) ? nCount : text.size();
+  const bool vertical_text_layout =
       (m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT ||
        m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT_FULLSCREEN);
+  const uint8_t flags =
+      static_cast<uint8_t>((vertical_text_layout ? 1 : 0) |
+                           (m_style.vertical_text_left_to_right ? 2 : 0));
+  const int max_dim =
+      vertical_text_layout ? m_style.max_height : m_style.max_width;
+
+  TextSizeKey key{pTextFormat.Get(), max_dim, flags,
+                  wstring(text.data(), clampedCount)};
+  {
+    std::lock_guard<std::mutex> lk(cacheMutex);
+    auto it = textSizeCache.find(key);
+    if (it != textSizeCache.end()) {
+      *lpSize = it->second;
+      return;
+    }
+  }
+
+  ComPtr<IDWriteTextLayout> pTextLayout;
   DWRITE_FLOW_DIRECTION flow = m_style.vertical_text_left_to_right
                                    ? DWRITE_FLOW_DIRECTION_LEFT_TO_RIGHT
                                    : DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT;
   if (vertical_text_layout) {
     HR(m_pWriteFactory->CreateTextLayout(
-        text.c_str(), (int)nCount, pTextFormat.Get(), 0.0f,
+        text.c_str(), (int)clampedCount, pTextFormat.Get(), 0.0f,
         (float)m_style.max_height, pTextLayout.ReleaseAndGetAddressOf()));
     HR(pTextLayout->SetReadingDirection(
         DWRITE_READING_DIRECTION_TOP_TO_BOTTOM));
     HR(pTextLayout->SetFlowDirection(flow));
-  } else
+  } else {
     HR(m_pWriteFactory->CreateTextLayout(
-        text.c_str(), (int)nCount, pTextFormat.Get(), (float)m_style.max_width,
-        0, pTextLayout.ReleaseAndGetAddressOf()));
+        text.c_str(), (int)clampedCount, pTextFormat.Get(),
+        (float)m_style.max_width, 0, pTextLayout.ReleaseAndGetAddressOf()));
+  }
 
   DWRITE_TEXT_METRICS textMetrics;
   HR(pTextLayout->GetMetrics(&textMetrics));
@@ -690,23 +733,19 @@ void D2D::GetTextSize(const wstring& text,
   lpSize->cx = (int)sz.width;
   lpSize->cy = (int)sz.height;
 
+  // Reuse the same IDWriteTextLayout via SetMaxWidth/SetMaxHeight instead of
+  // recreating it from scratch just to query overhang metrics.
   if (vertical_text_layout) {
     auto max_height =
-        m_style.max_height == 0 ? textMetrics.height : m_style.max_height;
-    HR(m_pWriteFactory->CreateTextLayout(
-        text.c_str(), (int)nCount, pTextFormat.Get(),
-        textMetrics.widthIncludingTrailingWhitespace, max_height,
-        pTextLayout.ReleaseAndGetAddressOf()));
-    HR(pTextLayout->SetReadingDirection(
-        DWRITE_READING_DIRECTION_TOP_TO_BOTTOM));
-    HR(pTextLayout->SetFlowDirection(flow));
+        m_style.max_height == 0 ? textMetrics.height : (float)m_style.max_height;
+    HR(pTextLayout->SetMaxWidth(textMetrics.widthIncludingTrailingWhitespace));
+    HR(pTextLayout->SetMaxHeight(max_height));
   } else {
     auto max_width = m_style.max_width == 0
                          ? textMetrics.widthIncludingTrailingWhitespace
-                         : m_style.max_width;
-    HR(m_pWriteFactory->CreateTextLayout(
-        text.c_str(), (int)nCount, pTextFormat.Get(), max_width,
-        textMetrics.height, pTextLayout.ReleaseAndGetAddressOf()));
+                         : (float)m_style.max_width;
+    HR(pTextLayout->SetMaxWidth(max_width));
+    HR(pTextLayout->SetMaxHeight(textMetrics.height));
   }
 
   DWRITE_OVERHANG_METRICS overhangMetrics;
@@ -720,6 +759,13 @@ void D2D::GetTextSize(const wstring& text,
       lpSize->cy += (LONG)(overhangMetrics.top + 1);
     if (overhangMetrics.bottom > 0)
       lpSize->cy += (LONG)(overhangMetrics.bottom + 1);
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(cacheMutex);
+    if (textSizeCache.size() >= kMaxTextSizeCacheEntries)
+      textSizeCache.clear();
+    textSizeCache.emplace(std::move(key), *lpSize);
   }
 }
 
