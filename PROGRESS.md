@@ -4,6 +4,58 @@
 
 ---
 
+## 2026-11-19 · 第 4 阶段：IPC 防卡死 · 设计方案（待用户确认，尚未写代码）
+
+**读代码得到的事实（只读，没有改动）**
+
+1. `WeaselIPC/PipeChannel.cpp:43-44` `_Connect` 在管道一直 BUSY 时 `while(...) WaitNamedPipe(name, 500)` 无限循环。
+2. `PipeChannel.cpp:71-77` `_WritePipe` 同步 `WriteFile` 后调用 `FlushFileBuffers`，要等对端把数据读走，且无法设超时。`:88-102` `_Receive` 同步 `ReadFile`，无超时。`include/PipeChannel.h:120-125` `Transact` = `_Ensure` → `_Send`（失败重连一次）→ `_ReceiveResponse`。
+3. **服务端所有请求都在全局互斥锁 `g_api_mutex` 下串行处理**（`WeaselIPCServer/WeaselServerImpl.cpp:191-194`），每个客户端一个线程（`:432`）。任何一个请求卡住，所有宿主进程的所有请求都排在后面。
+4. 服务端响应时同样 `_Send` → `_WritePipe` → `FlushFileBuffers`（`:451`，在持有 `g_api_mutex` 的回调里）。**如果客户端发完请求后被挂起，服务端会卡在 Flush 里，并且持有全局锁**，进而拖住所有宿主。
+5. 服务端长时间持锁的路径：`RimeWithWeasel.cpp:491-497` `EndMaintenance()` → `Initialize()` → `rime_api->join_maintenance_thread()`（`:120` 附近），部署没结束会一直阻塞；`AddSession`（`:170-173`）在 `m_disabled` 时也会调用 `EndMaintenance()`，即**新程序激活输入法时可能被前一次部署堵住**。这些是读代码得出的，**没有在本机复现过卡死**。
+6. **每个按键都先做一次 `Echo`**：`KeyEventSink.cpp:20` → `WeaselTSF.cpp:249-250` `_EnsureServerConnected()` 里 `m_client.Echo()`，所以每个按键事件至少 2 次管道往返（`Echo` + `ProcessKeyEvent`）。`Echo` 失败还会 `_Reconnect()`（断开、连接、`StartSession`）并在 `retry >= 6` 时拉起 `start_service.bat`，全都在按键路径上。
+7. `WeaselClientImpl.cpp:177` `GetResponseData` 解析的是线程缓冲区里现有的内容，不管上一次事务是否成功。**推测**：事务失败后可能重放旧的响应（比如重复上屏），**没有验证**。
+
+**方案（只改客户端和管道层，不改线路格式）**
+
+- **C1 连接限时**：`_Connect` 总时长封顶（建议 250ms），超过就失败返回，不再无限循环。
+- **C2 重叠 I/O + 超时 + 取消**：客户端句柄用 `FILE_FLAG_OVERLAPPED`，读写用 `OVERLAPPED` + `WaitForSingleObject(超时)`，超时 `CancelIoEx` 后必须等取消完成再返回。**客户端必须去掉 `FlushFileBuffers`**（它无法设超时）。建议默认超时 250ms（本次实测服务端 p95 约 5ms，最大 97ms，冷启动首键约 9ms）。
+- **C3 按消息区分策略**：只有按键路径和 `Echo` 用 250ms，`StartSession` 用 1000ms；`StartMaintenance`、`EndMaintenance`、`ShutdownServer`、`TrayCommand` 保持不限时（部署器的 `EndMaintenance` 本来就可能很久）。
+- **C4 超时后的协议恢复**：超时就关闭这根管道（迟到的响应被系统丢弃）、把线程缓冲区标记为无效（`GetResponseData` 返回 false）、返回失败；下一次调用自动重连，服务端的会话 ID 与管道无关，用 `Echo` 确认会话还在，不在才走原来的 `_Reconnect()`。
+- **C5 熔断**（进程内共享，放在 `ClientImpl::_SendMessage`）：连续 2 次超时（2 秒内）→ 打开，打开期间所有 IPC 立即返回失败（一次原子读）；3 秒后半开，只允许一个探测请求（超时 100ms），成功则关闭，失败则退避 3s→6s→12s→最长 30s。`Client` 增加一个 `Suspended()` 查询，`_EnsureServerConnected` 在熔断期间直接返回 false，**避免每个按键都 `_Reconnect` 和反复拉起 `start_service.bat`**。熔断期间按键不被吞（`*pfEaten = FALSE`），正在进行的组字由 TSF 本地结束（复用 `_AbortComposition()`，其中的 `ClearComposition` 会立即失败）。
+- **C6 服务端去掉响应时的 `FlushFileBuffers`**：服务端管道缓冲 64KB，小消息 `WriteFile` 不会阻塞，Flush 是唯一可能被挂起的客户端卡住的地方。不改线路格式。
+
+**影响面（`AGENTS.md` 第 4 节第 2 条）**
+
+- COM 接口、ABI：不变。只新增 `Client` 的内部查询方法（`WeaselIPC` 是静态库）。
+- IPC 消息格式：**不变**。新客户端配旧服务端、旧客户端配新服务端都能用（C6 只是少调一次 Flush）。
+- 高 DPI 逻辑：不涉及。
+- 宿主进程内约束（第 4 节第 6 条）：不新增线程，只用 Win32 事件；不抛未捕获异常；阻塞上限从"无限"降到约 250ms。
+- 受影响的 TSF 回调：`OnTestKeyDown`/`OnKeyDown`/`OnTestKeyUp`/`OnKeyUp`（失败时 `pfEaten = FALSE`，按键交给应用）；`DoEditSession`（缓冲区无效时 `ok = false`，跳过组字更新）；`OnSetThreadFocus`、`FocusIn/Out`、`UpdateInputPosition`（熔断时立即返回）；候选窗鼠标回调（`CandidateList.cpp:405-450`，立即返回 false）。
+
+**风险**
+
+- **误判**：服务端合法地慢过 250ms（部署、杀毒、换页）会触发熔断，期间用户会打出原始字母。缓解：要求连续 2 次超时，半开探测恢复，阈值可调。
+- 重叠 I/O 在消息模式下的 `ERROR_MORE_DATA` 路径要小心处理；`CancelIoEx` 后必须等取消完成才能释放 `OVERLAPPED` 和事件。
+- 熔断期间候选窗内容可能陈旧一小段时间，需要本地收尾。
+
+**分三步实施，每步单独编译、测试、提交**
+
+1. 低风险：C1 连接限时、C6 去掉服务端 Flush、C4 的"缓冲区无效标记"。
+2. C2 + C3：重叠 I/O 超时、按消息策略、去掉客户端 Flush。
+3. C5：熔断和 TSF 短路。
+
+**验证方法**
+
+- 故障注入：打字时用脚本把服务端进程挂起 5 秒再恢复。改之前应观察到宿主 UI 线程被卡约 5 秒（用 ETW 的 `tsf.ipc_key_roundtrip` 最大值和记事本是否有响应来测）；改之后最多卡约 250ms 一次，随后每个按键约 1ms 以内放行，服务端恢复后约 3 秒内自动恢复。
+- 另外：服务端进程被杀、管道中途断开，确认不会重复上屏、不会残留组字。
+- 正常打字不退化：`tsf.ipc_key_roundtrip` 的 p50/p95 与 M4/A5 对比。
+- x64、x86 都要编译通过，不新增警告。
+
+**顺带记录（不属于本阶段）**：每个按键先 `Echo` 一次（见事实 6）是第 5 阶段第 3 项的实证，可以改成"距离上次成功事务超过约 1 秒才 `Echo`"，能把管道往返减半，但会改变 TSF 的会话校验时机，要单独出方案。
+
+---
+
 ## 2026-11-19 · 第 0 阶段：按键延迟计时（ETW，T1/T3/T5/T7）
 
 分支：`perf/phase0-timing`（从 master `f96ed24` 切出，**尚未提交**）。
