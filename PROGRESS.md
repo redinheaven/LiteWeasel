@@ -63,11 +63,40 @@
 - 第一次抓取 0 个事件。原因是 `WeaselUI/WeaselUI.cpp` 里 provider 的 GUID 字节写错了（最后 8 字节写成 `ad ef 9e 26 5a bf 26 b5`，应为 `ad ef 9e 26 5b 26 ab f5`），注册的是另一个 GUID。已修正，重编 x64、x86 均 0 错误 0 警告。
 - 抓取时 `logman` 要显式写 `0xffffffffffffffff 0xff`（关键字和级别）。`TraceLoggingWrite` 默认级别是 Verbose，会话级别太低会被过滤。
 
+**宿主进程（T1、T5、T7）验证：已通过**
+
+用户决定直接在本机（台式机）测，不再倒腾到笔记本。操作：备份词库 → 卸载官方 0.17.4 → 静默安装我们的构建（`weasel-0.17.4.0.199bfae-installer.exe`）。
+
+- 备份：`C:\Users\Administrator\RimeBackup_20261119\Rime`（116 个文件，逐文件 MD5 与 `%APPDATA%\Rime` 完全一致）+ `HKCU_Rime.reg`、`HKLM_WOW6432Node_Rime.reg`。第一次备份有 4 个 leveldb 文件复制失败，原因是官方 `WeaselServer` 自己重新起来占着文件，先用 `WeaselServer.exe /q` 退出再 `robocopy /MIR` 才完整。**备份词库前必须先确认没有 WeaselServer 在运行。**
+- 卸载程序只删安装目录和 `HKLM` 项，不动 `%APPDATA%\Rime` 和 `HKCU`。卸载后 Rime 目录仍是 116 个文件。
+- **踩的坑**：替换系统里的 `weasel.dll` 后，**已经运行的进程仍然在用内存里的旧 DLL**（explorer、chrome、旧记事本等）。旧 DLL 照样能连上我们的服务端，所以服务端有事件、宿主侧却是 0 条，容易误判成计时代码有问题。必须**新开进程**（或注销）才会加载新 DLL。从这里（Claude 的工具进程）启动的 `notepad` 没有出现在用户桌面上，既没窗口也没加载 `MSCTF.dll`，要让用户自己新开。
+- 第 3 次抓取（新开的记事本 PID 25268，14:55 启动，模块里有 `weasel.dll`）抓到全部 7 个阶段。
+
+| 阶段 | 次数 | p50 (µs) | p95 (µs) | max (µs) |
+|---|---|---|---|---|
+| `tsf.ipc_key_roundtrip`（T1） | 418 | 745 | 5746 | 97418 |
+| `srv.on_key_event`（T3） | 421 | 624 | 5616 | 97299 |
+| `tsf.edit_session_wait`（T5） | 418 | 12 | 18 | 128 |
+| `tsf.get_response`（T5） | 418 | 409 | 461 | 622 |
+| `tsf.do_edit_session`（T5，含嵌套的 UI 刷新） | 418 | 1510 | 10802 | 38213 |
+| `ui.do_paint`（T7） | 162 | 3311 | 3806 | 14690 |
+| `ui.present`（T7，已含在 `do_paint` 内） | 162 | 190 | 274 | 419 |
+
+**这是台式机（24 逻辑核心）、单次、单人打字的数据，不是基准，不能代表目标笔记本。** 事件数 418 包含按下、松开和测试按键。阶段之间有嵌套（`do_edit_session` 包含 `get_response` 和 UI 刷新，`do_paint` 包含 `present`），不能直接相加。
+
+**初步观察（只针对这一组台式机数据，要在笔记本上复核）**
+
+1. 一次 IPC 往返 p50 745µs，服务端处理 p50 624µs，所以管道本身的开销约 120µs，**耗时主要在服务端（librime）**，不在管道。
+2. `ui.present` p50 只有 190µs，**"`Present(1, 0)` 被垂直同步阻塞"的推测在这台机器上不成立**。`do_paint` 的 3.3ms 里绝大部分是 `Present` 之外的绘制（D2D 经 WARP 软件渲染），这是第 5 阶段第 1 项（阴影、模糊）要看的东西，笔记本上可能更大。
+3. `tsf.edit_session_wait` p50 只有 12µs，这个宿主（记事本）里 `RequestEditSession` 基本是同步回调。别的宿主可能不同。
+4. p95 和 max 远大于 p50（服务端 p95 5.6ms、max 97ms），是偶发尖峰，原因没查。可能是首个按键、userdb 写入或其他进程抢 CPU，需要在更干净的条件下重复测。
+
 **还没验证的**
 
-1. **T1、T5、T7（在宿主进程里的 `weasel.dll`）没有验证**，因为没有装我们的 `weasel.dll`。用户盲打那次也没有产生事件，原因没查：我们的服务端当时用的是官方 `weasel.dll`，且 GUID 当时是错的。
-2. 没有测过开启和关闭时的额外开销。
-3. 没有任何目标机器上的延迟数据。
+1. 没有测过开启和关闭 ETW 时的额外开销。
+2. 没有分离"新程序里的第一个字"（冷启动）、部署期间、睡眠唤醒后这几个场景的数据，这次是混在一起的一次连续输入。
+3. 没有目标笔记本上的数据。
+4. 用户在本机的输入法现在是我们的测试版（官方 0.17.4 已卸载）。要退回，卸载测试版、重装官方版即可，词库不用动。
 
 **抓取方法**
 
@@ -81,7 +110,7 @@ python tools/perf/summarize.py lw.csv
 
 **遗留和下一步**
 
-1. 在目标机器（X1 Carbon 5th、X220）上完整安装我们的构建，验证 T1、T5、T7 能抓到。那里没有官方版本需要保护的话，这一步最合适。
+1. 在目标机器（X1 Carbon 5th、X220）上完整安装我们的构建，验证 T1、T5、T7 能抓到。**已出安装包**：`output/archives/weasel-0.17.4.0.199bfae-installer.exe`（12,186,806 字节，SHA256 `59cd2c73d73d1360024767114853b6ac47cc28fb70bf7d094a24651ea8e13aa1`，未签名，只含 x64 和 x86，不含 ARM；NSIS 通过 winget 装在台式机上，用 `makensis /DWEASEL_VERSION=0.17.4 /DWEASEL_BUILD=0 /DPRODUCT_VERSION=0.17.4.0.199bfae output\install.nsi` 生成，Idle 优先级）。用户决定先卸载笔记本上的官方版再装，卸载前必须备份 `%APPDATA%\Rime`。
 2. 在目标机器（X1 Carbon 5th、X220）上测四个场景：新程序第一个字、连续快速输入、部署期间输入、睡眠唤醒后第一个字。
 3. 看数据再决定要不要补 T0、T2、T4、T6、T8、T9。
 4. `Present(1, 0)` 是否阻塞 UI 线程，只是推测，要看 `ui.present` 的数据。
