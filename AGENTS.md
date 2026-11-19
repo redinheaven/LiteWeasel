@@ -1,11 +1,11 @@
-# AGENTS.md — Lite_weasel 工程规范
+# AGENTS.md — LiteWeasel 工程规范
 
 本文件写给参与本项目的 AI 代理和开发者。动手之前必须先读完，并同时阅读 `initial task.txt`（顶层设计）和 `PROGRESS.md`（当前进度）。
 
 ## 1. 项目定位
 
 - 上游：`rime/weasel`（小狼毫，Windows 平台的 Rime 输入法前端）
-- Fork：https://github.com/redinheaven/Lite_weasel
+- Fork：https://github.com/redinheaven/LiteWeasel
 - 目标机器：低配旧笔记本，比如 ThinkPad X1 Carbon 5th（KabyLake-U）、X220。特点是内存小、CPU 低压低频。
 - 核心目标：打字丝滑。这包括第一个字出得快、按键响应不粘滞、宿主程序界面不被输入法拖死。
 

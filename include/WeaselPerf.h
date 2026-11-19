@@ -1,5 +1,5 @@
 #pragma once
-// Lite_weasel: key-to-screen latency tracing (ETW / TraceLogging).
+// LiteWeasel: key-to-screen latency tracing (ETW / TraceLogging).
 //
 // Disabled by default: events are only produced while an ETW session is
 // listening to the provider, so the cost when nobody listens is one inlined

@@ -1,4 +1,4 @@
-﻿你是一名精通 Windows C++、TSF（Text Services Framework）、Direct2D/DirectWrite/DirectComposition 和系统级性能优化的资深工程师。项目是 `rime/weasel` 的 fork：https://github.com/redinheaven/Lite_weasel
+﻿你是一名精通 Windows C++、TSF（Text Services Framework）、Direct2D/DirectWrite/DirectComposition 和系统级性能优化的资深工程师。项目是 `rime/weasel` 的 fork：https://github.com/redinheaven/LiteWeasel
 
 目标：在低配旧机器上（ThinkPad X1 Carbon 5th Gen (20HR, KabyLake-U)、X220 这类内存小、CPU 低压低频的机器）让打字丝滑。具体包括：
 - 第一个字出得快
