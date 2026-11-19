@@ -35,6 +35,8 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
       m_current_dark_mode(false),
       m_global_ascii_mode(false),
       m_show_notifications_time(1200),
+      m_max_input_length(16),
+      m_slow_key_ms(150),
       _UpdateUICallback(NULL) {
   LOG(INFO) << "constructing RimeWithWeaselHandler";
   m_ui->InServer() = true;
@@ -168,6 +170,15 @@ void RimeWithWeaselHandler::Initialize() {
     if (!rime_api->config_get_int(&config, "show_notifications_time",
                                   &m_show_notifications_time))
       m_show_notifications_time = 1200;
+    // 输入串长度上限：乱敲时切分方案会爆炸，每键耗时随长度线性增长。
+    // 0 表示不限制。
+    if (!rime_api->config_get_int(&config, "max_input_length",
+                                  &m_max_input_length))
+      m_max_input_length = 16;
+    // 单个字母键处理超过这么多毫秒后，本次组字里不再接受新字母（客户端按键
+    // 请求 250ms 超时，超时会触发熔断、按键变成英文字母）。0 表示不限制。
+    if (!rime_api->config_get_int(&config, "slow_key_ms", &m_slow_key_ms))
+      m_slow_key_ms = 150;
     _LoadAppOptions(&config, m_app_options);
     rime_api->config_close(&config);
   }
@@ -298,8 +309,44 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
     return FALSE;
   LONGLONG perf_lap = weasel::perf::Mark();
   RimeSessionId session_id = to_session_id(ipc_id);
+  // 忽略继续追加的无修饰字母键（吞掉，不交给 librime），两种情况：
+  //  1) 输入串已达长度上限；
+  //  2) 本次组字里已经有一个字母键处理得太慢（见 m_slow_key_ms）。
+  // 退格、空格、回车、数字选词、翻页等其他键不受影响。
+  const bool is_letter_key =
+      !(keyEvent.mask & (ibus::Modifier::CONTROL_MASK |
+                         ibus::Modifier::ALT_MASK |
+                         ibus::Modifier::SUPER_MASK |
+                         ibus::Modifier::META_MASK |
+                         ibus::Modifier::RELEASE_MASK)) &&
+      ((keyEvent.keycode >= 'a' && keyEvent.keycode <= 'z') ||
+       (keyEvent.keycode >= 'A' && keyEvent.keycode <= 'Z'));
+  if (is_letter_key && (m_max_input_length > 0 || m_slow_key_ms > 0)) {
+    const char* input = rime_api->get_input(session_id);
+    const size_t len = input ? strlen(input) : 0;
+    if (len == 0) {
+      m_slow_sessions.erase(ipc_id);  // 输入已清空，新一轮组字重新开始
+    } else if ((m_max_input_length > 0 &&
+                len >= static_cast<size_t>(m_max_input_length)) ||
+               m_slow_sessions.count(ipc_id)) {
+      weasel::perf::Lap("srv.rime.input_capped", perf_lap);
+      return TRUE;
+    }
+  }
+  LARGE_INTEGER key_t0 = {}, key_t1 = {};
+  QueryPerformanceCounter(&key_t0);
   Bool handled = rime_api->process_key(session_id, keyEvent.keycode,
                                        expand_ibus_modifier(keyEvent.mask));
+  if (is_letter_key && m_slow_key_ms > 0) {
+    QueryPerformanceCounter(&key_t1);
+    static const LONGLONG freq = [] {
+      LARGE_INTEGER f;
+      QueryPerformanceFrequency(&f);
+      return f.QuadPart;
+    }();
+    if ((key_t1.QuadPart - key_t0.QuadPart) * 1000 > m_slow_key_ms * freq)
+      m_slow_sessions.insert(ipc_id);
+  }
   weasel::perf::Lap("srv.rime.process_key", perf_lap);
   // vim_mode when keydown only
   if (!handled && !(keyEvent.mask & ibus::Modifier::RELEASE_MASK)) {
