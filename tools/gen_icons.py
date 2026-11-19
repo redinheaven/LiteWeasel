@@ -12,10 +12,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 SIZES = [16, 20, 24, 32, 48, 64, 256]
 
-TEAL = (8, 145, 178, 255)        # #0891B2 - primary LiteWeasel teal-blue
-TEAL_ACCENT = (103, 232, 249, 255)  # #67E8F9 - bright cyan accent dot
-SLATE = (51, 65, 85, 255)        # #334155 - distinct slate-blue for EN mode
-AMBER = (217, 119, 6, 255)       # #D97706 - maintenance / reload
+# Low-saturation palette (HSV saturation <= ~50%); white glyphs keep >= 3:1 contrast.
+TEAL = (79, 127, 140, 255)          # #4F7F8C - muted teal-grey, primary LiteWeasel colour
+TEAL_ACCENT = (181, 211, 217, 255)  # #B5D3D9 - pale accent dot
+SLATE = (66, 75, 89, 255)           # #424B59 - muted slate for EN mode
+AMBER = (169, 128, 86, 255)         # #A98056 - muted amber, maintenance / reload
 WHITE = (255, 255, 255, 255)
 
 
