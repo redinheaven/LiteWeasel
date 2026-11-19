@@ -18,21 +18,21 @@ Unicode true
 !define WEASEL_BUILD 0
 !endif
 
-!define WEASEL_ROOT $INSTDIR\weasel-${WEASEL_VERSION}
+!define WEASEL_ROOT $INSTDIR\LiteWeasel-${WEASEL_VERSION}
 !define REG_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weasel"
 
 ; The name of the installer
-Name "小狼毫 ${WEASEL_VERSION}"
+Name "LiteWeasel ${WEASEL_VERSION}"
 
 ; The file to write
-OutFile "archives\weasel-${PRODUCT_VERSION}-installer.exe"
+OutFile "archives\LiteWeasel-${PRODUCT_VERSION}-installer.exe"
 
 VIProductVersion "${WEASEL_VERSION}.${WEASEL_BUILD}"
-VIAddVersionKey /LANG=2052 "ProductName" "小狼毫"
+VIAddVersionKey /LANG=2052 "ProductName" "LiteWeasel"
 VIAddVersionKey /LANG=2052 "Comments" "Powered by RIME | 中州韻輸入法引擎"
 VIAddVersionKey /LANG=2052 "CompanyName" "式恕堂"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "Copyleft RIME Developers"
-VIAddVersionKey /LANG=2052 "FileDescription" "小狼毫輸入法"
+VIAddVersionKey /LANG=2052 "FileDescription" "LiteWeasel 輸入法"
 VIAddVersionKey /LANG=2052 "FileVersion" "${WEASEL_VERSION}"
 
 !define MUI_ICON ..\resource\weasel.ico
@@ -60,53 +60,53 @@ RequestExecutionLevel admin
 ; Languages
 
 !insertmacro MUI_LANGUAGE "TradChinese"
-LangString DISPLAYNAME ${LANG_TRADCHINESE} "小狼毫輸入法"
-LangString LNKFORMANUAL ${LANG_TRADCHINESE} "【小狼毫】說明書"
-LangString LNKFORSETTING ${LANG_TRADCHINESE} "【小狼毫】輸入法設定"
-LangString LNKFORDICT ${LANG_TRADCHINESE} "【小狼毫】用戶詞典管理"
-LangString LNKFORSYNC ${LANG_TRADCHINESE} "【小狼毫】用戶資料同步"
-LangString LNKFORDEPLOY ${LANG_TRADCHINESE} "【小狼毫】重新部署"
-LangString LNKFORSERVER ${LANG_TRADCHINESE} "小狼毫算法服務"
-LangString LNKFORUSERFOLDER ${LANG_TRADCHINESE} "【小狼毫】用戶文件夾"
-LangString LNKFORAPPFOLDER ${LANG_TRADCHINESE} "【小狼毫】程序文件夾"
-LangString LNKFORUPDATER ${LANG_TRADCHINESE} "【小狼毫】檢查新版本"
-LangString LNKFORSETUP ${LANG_TRADCHINESE} "【小狼毫】安裝選項"
-LangString LNKFORUNINSTALL ${LANG_TRADCHINESE} "卸載小狼毫"
-LangString CONFIRMATION ${LANG_TRADCHINESE} "安裝前，請先卸載舊版本的小狼毫。$\n$\n按下「確定」移除舊版本，按下「取消」放棄本次安裝。"
+LangString DISPLAYNAME ${LANG_TRADCHINESE} "LiteWeasel"
+LangString LNKFORMANUAL ${LANG_TRADCHINESE} "【LiteWeasel】說明書"
+LangString LNKFORSETTING ${LANG_TRADCHINESE} "【LiteWeasel】輸入法設定"
+LangString LNKFORDICT ${LANG_TRADCHINESE} "【LiteWeasel】用戶詞典管理"
+LangString LNKFORSYNC ${LANG_TRADCHINESE} "【LiteWeasel】用戶資料同步"
+LangString LNKFORDEPLOY ${LANG_TRADCHINESE} "【LiteWeasel】重新部署"
+LangString LNKFORSERVER ${LANG_TRADCHINESE} "LiteWeasel 算法服務"
+LangString LNKFORUSERFOLDER ${LANG_TRADCHINESE} "【LiteWeasel】用戶文件夾"
+LangString LNKFORAPPFOLDER ${LANG_TRADCHINESE} "【LiteWeasel】程序文件夾"
+LangString LNKFORUPDATER ${LANG_TRADCHINESE} "【LiteWeasel】檢查新版本"
+LangString LNKFORSETUP ${LANG_TRADCHINESE} "【LiteWeasel】安裝選項"
+LangString LNKFORUNINSTALL ${LANG_TRADCHINESE} "卸載 LiteWeasel"
+LangString CONFIRMATION ${LANG_TRADCHINESE} "安裝前，請先卸載舊版本的輸入法。$\n$\n按下「確定」移除舊版本，按下「取消」放棄本次安裝。"
 LangString SYSTEMVERSIONNOTOK ${LANG_TRADCHINESE} "您的系统不被支持，最低系統要求:Windows 8.1!"
 LangString AUTOCHKUPDATE ${LANG_TRADCHINESE} "自動檢查版本更新？"
 
 !insertmacro MUI_LANGUAGE "SimpChinese"
-LangString DISPLAYNAME ${LANG_SIMPCHINESE} "小狼毫输入法"
-LangString LNKFORMANUAL ${LANG_SIMPCHINESE} "【小狼毫】说明书"
-LangString LNKFORSETTING ${LANG_SIMPCHINESE} "【小狼毫】输入法设定"
-LangString LNKFORDICT ${LANG_SIMPCHINESE} "【小狼毫】用户词典管理"
-LangString LNKFORSYNC ${LANG_SIMPCHINESE} "【小狼毫】用户资料同步"
-LangString LNKFORDEPLOY ${LANG_SIMPCHINESE} "【小狼毫】重新部署"
-LangString LNKFORSERVER ${LANG_SIMPCHINESE} "小狼毫算法服务"
-LangString LNKFORUSERFOLDER ${LANG_SIMPCHINESE} "【小狼毫】用户文件夹"
-LangString LNKFORAPPFOLDER ${LANG_SIMPCHINESE} "【小狼毫】程序文件夹"
-LangString LNKFORUPDATER ${LANG_SIMPCHINESE} "【小狼毫】检查新版本"
-LangString LNKFORSETUP ${LANG_SIMPCHINESE} "【小狼毫】安装选项"
-LangString LNKFORUNINSTALL ${LANG_SIMPCHINESE} "卸载小狼毫"
-LangString CONFIRMATION ${LANG_SIMPCHINESE} '安装前，请先卸载旧版本的小狼毫。$\n$\n点击 "确定" 移除旧版本，或点击 "取消" 放弃本次安装。'
+LangString DISPLAYNAME ${LANG_SIMPCHINESE} "LiteWeasel"
+LangString LNKFORMANUAL ${LANG_SIMPCHINESE} "【LiteWeasel】说明书"
+LangString LNKFORSETTING ${LANG_SIMPCHINESE} "【LiteWeasel】输入法设定"
+LangString LNKFORDICT ${LANG_SIMPCHINESE} "【LiteWeasel】用户词典管理"
+LangString LNKFORSYNC ${LANG_SIMPCHINESE} "【LiteWeasel】用户资料同步"
+LangString LNKFORDEPLOY ${LANG_SIMPCHINESE} "【LiteWeasel】重新部署"
+LangString LNKFORSERVER ${LANG_SIMPCHINESE} "LiteWeasel 算法服务"
+LangString LNKFORUSERFOLDER ${LANG_SIMPCHINESE} "【LiteWeasel】用户文件夹"
+LangString LNKFORAPPFOLDER ${LANG_SIMPCHINESE} "【LiteWeasel】程序文件夹"
+LangString LNKFORUPDATER ${LANG_SIMPCHINESE} "【LiteWeasel】检查新版本"
+LangString LNKFORSETUP ${LANG_SIMPCHINESE} "【LiteWeasel】安装选项"
+LangString LNKFORUNINSTALL ${LANG_SIMPCHINESE} "卸载 LiteWeasel"
+LangString CONFIRMATION ${LANG_SIMPCHINESE} '安装前，请先卸载旧版本的输入法。$\n$\n点击 "确定" 移除旧版本，或点击 "取消" 放弃本次安装。'
 LangString SYSTEMVERSIONNOTOK ${LANG_SIMPCHINESE} "您的系統不被支持，最低系统要求:Windows 8.1!"
 LangString AUTOCHKUPDATE ${LANG_SIMPCHINESE} "自动检查版本更新？"
 
 !insertmacro MUI_LANGUAGE "English"
-LangString DISPLAYNAME ${LANG_ENGLISH} "Weasel"
-LangString LNKFORMANUAL ${LANG_ENGLISH} "Weasel Manual"
-LangString LNKFORSETTING ${LANG_ENGLISH} "Weasel Settings"
-LangString LNKFORDICT ${LANG_ENGLISH} "Weasel Dictionary Manager"
-LangString LNKFORSYNC ${LANG_ENGLISH} "Weasel Sync User Profile"
-LangString LNKFORDEPLOY ${LANG_ENGLISH} "Weasel Deploy"
-LangString LNKFORSERVER ${LANG_ENGLISH} "Weasel Server"
-LangString LNKFORUSERFOLDER ${LANG_ENGLISH} "Weasel User Folder"
-LangString LNKFORAPPFOLDER ${LANG_ENGLISH} "Weasel App Folder"
-LangString LNKFORUPDATER ${LANG_ENGLISH} "Weasel Check for Updates"
-LangString LNKFORSETUP ${LANG_ENGLISH} "Weasel Installation Preference"
-LangString LNKFORUNINSTALL ${LANG_ENGLISH} "Uninstall Weasel"
-LangString CONFIRMATION ${LANG_ENGLISH} "Before installation, please uninstall the old version of Weasel.$\n$\nPress 'OK' to remove the old version, or 'Cancel' to abort installation."
+LangString DISPLAYNAME ${LANG_ENGLISH} "LiteWeasel"
+LangString LNKFORMANUAL ${LANG_ENGLISH} "LiteWeasel Manual"
+LangString LNKFORSETTING ${LANG_ENGLISH} "LiteWeasel Settings"
+LangString LNKFORDICT ${LANG_ENGLISH} "LiteWeasel Dictionary Manager"
+LangString LNKFORSYNC ${LANG_ENGLISH} "LiteWeasel Sync User Profile"
+LangString LNKFORDEPLOY ${LANG_ENGLISH} "LiteWeasel Deploy"
+LangString LNKFORSERVER ${LANG_ENGLISH} "LiteWeasel Server"
+LangString LNKFORUSERFOLDER ${LANG_ENGLISH} "LiteWeasel User Folder"
+LangString LNKFORAPPFOLDER ${LANG_ENGLISH} "LiteWeasel App Folder"
+LangString LNKFORUPDATER ${LANG_ENGLISH} "LiteWeasel Check for Updates"
+LangString LNKFORSETUP ${LANG_ENGLISH} "LiteWeasel Installation Preference"
+LangString LNKFORUNINSTALL ${LANG_ENGLISH} "Uninstall LiteWeasel"
+LangString CONFIRMATION ${LANG_ENGLISH} "Before installation, please uninstall the old version.$\n$\nPress 'OK' to remove the old version, or 'Cancel' to abort installation."
 LangString SYSTEMVERSIONNOTOK ${LANG_ENGLISH} "Your system not supported, minimium system required: Windows 8.1!"
 LangString AUTOCHKUPDATE ${LANG_ENGLISH} "Automatically check for updates?"
 
@@ -127,18 +127,18 @@ toquit:
   ; install x64 build for NativeARM64_WINDOWS11 and NativeAMD64_WINDOWS11
   ${If} ${AtLeastWin11} ; Windows 11 and above
     ${If} ${IsNativeARM64}
-      StrCpy $INSTDIR "$PROGRAMFILES64\Rime"
+      StrCpy $INSTDIR "$PROGRAMFILES64\LiteWeasel"
     ${ElseIf} ${IsNativeAMD64}
-      StrCpy $INSTDIR "$PROGRAMFILES64\Rime"
+      StrCpy $INSTDIR "$PROGRAMFILES64\LiteWeasel"
     ${Else}
-      StrCpy $INSTDIR "$PROGRAMFILES\Rime"
+      StrCpy $INSTDIR "$PROGRAMFILES\LiteWeasel"
     ${Endif}
   ; install x64 build for NativeAMD64_BELLOW_WINDOWS11
   ${Else} ; Windows 10 or bellow
     ${If} ${IsNativeAMD64}
-      StrCpy $INSTDIR "$PROGRAMFILES64\Rime"
+      StrCpy $INSTDIR "$PROGRAMFILES64\LiteWeasel"
     ${Else}
-      StrCpy $INSTDIR "$PROGRAMFILES\Rime"
+      StrCpy $INSTDIR "$PROGRAMFILES\LiteWeasel"
     ${Endif}
   ${Endif}
 skip:

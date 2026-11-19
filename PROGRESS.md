@@ -58,6 +58,22 @@
 
 ---
 
+## 2026-11-19 · 更名为 `LiteWeasel` 并重绘主图标与右下角状态角标
+
+**状态：代码、图标、安装包均已完成并编译安装到本机（`C:\Program Files\Rime\LiteWeasel-0.17.4`）；x64 和 Win32 均 0 错误、0 新增警告。**
+
+- **名称变更（保留 `%APPDATA%\Rime` 词库与原管道/注册表兼容）**：
+  - `include/WeaselUtility.h:190`：`get_weasel_ime_name()` 统一返回 `L"LiteWeasel"`（影响输入法列表、托盘提示、气泡、TSF 描述）。
+  - `WeaselDeployer/UIStyleSettingsDialog.cpp:232`、`.rc` 资源（`WeaselServer.rc`、`WeaselTSF.rc`、`WeaselDeployer.rc`、`WeaselSetup.rc`）：版本信息 `ProductName`/`FileDescription` 与界面标题改为 `LiteWeasel`。
+  - `output/install.nsi`：安装程序名、输出包名（`LiteWeasel-${PRODUCT_VERSION}-installer.exe`）、安装目录（`LiteWeasel-${WEASEL_VERSION}`）、开始菜单文件夹及快捷方式全部改为 `LiteWeasel`。
+- **图标与右下角标重绘（极简扁平徽章风，青蓝色底，16/20/24/32/48/64/256 多尺寸，`tools/gen_icons.py`）**：
+  - `resource/weasel.ico` & `WeaselSetup/WeaselSetup.ico`：青蓝圆角徽章 + 白色几何 `L` + 亮青角标点；
+  - `resource/zh.ico` / `resource/en.ico`：青蓝“中”字（16px 像素对齐）vs 深石板蓝“A”字（托盘与任务栏输入指示器高对比区分）；
+  - `resource/full.ico` / `resource/half.ico` / `resource/reload.ico`：实心圆（全角）、半实心圆（半角）、琥珀色双弧刷新（维护中）。
+- **验证**：x64 与 Win32 Release 编译 0 错误；[LiteWeasel-0.17.4.0.liteweasel-installer.exe](output/archives/LiteWeasel-0.17.4.0.liteweasel-installer.exe) 静默安装返回 `0`，`C:\Program Files\Rime\LiteWeasel-0.17.4\WeaselServer.exe` 哈希与 `output\WeaselServer.exe` 一致。
+
+---
+
 ## 2026-11-19 · 第 3 阶段（进程/维护优先级）与第 5 阶段第 3 项（跳过每键 `Echo`）实施与自动验证
 
 **状态：方案经用户确认，代码已实施，x64 和 Win32 均编译通过（0 错误、0 新增警告），全自动验证全部通过；未提交。**
