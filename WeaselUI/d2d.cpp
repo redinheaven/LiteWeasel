@@ -1,4 +1,5 @@
 #include "d2d.h"
+#include <WeaselPerf.h>
 #include <Dwmapi.h>
 #include <ShellScalingApi.h>
 #include <VersionHelpers.hpp>
@@ -32,6 +33,8 @@ DeviceResources::DeviceResources() : initialized(false) {}
 HRESULT DeviceResources::EnsureInitialized() {
   if (initialized)
     return S_OK;
+  WEASEL_PERF_SCOPE("ui.device_init");
+  LONGLONG perf_lap = weasel::perf::Mark();
   HRESULT hr = S_OK;
   // Prefer WARP to avoid loading the host process's hardware graphics driver.
   static const D3D_FEATURE_LEVEL featureLevels[] = {
@@ -56,6 +59,7 @@ HRESULT DeviceResources::EnsureInitialized() {
       return hr;
     }
   }
+  weasel::perf::Lap("ui.device_init.d3d11", perf_lap);
   hr = direct3dDevice.As(&dxgiDevice);
   if (FAILED(hr))
     return hr;
@@ -78,6 +82,7 @@ HRESULT DeviceResources::EnsureInitialized() {
       reinterpret_cast<void**>(dcompDevice.ReleaseAndGetAddressOf()));
   if (FAILED(hr))
     return hr;
+  weasel::perf::Lap("ui.device_init.dxgi_d2d_dcomp", perf_lap);
   hr = DWriteCreateFactory(
       DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
       reinterpret_cast<IUnknown**>(m_pWriteFactory.ReleaseAndGetAddressOf()));
@@ -87,6 +92,7 @@ HRESULT DeviceResources::EnsureInitialized() {
                         IID_PPV_ARGS(wicFactory.ReleaseAndGetAddressOf()));
   if (FAILED(hr))
     return hr;
+  weasel::perf::Lap("ui.device_init.dwrite_wic", perf_lap);
   initialized = true;
   return S_OK;
 }

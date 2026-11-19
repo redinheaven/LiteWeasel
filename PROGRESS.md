@@ -91,6 +91,55 @@
 3. `tsf.edit_session_wait` p50 只有 12µs，这个宿主（记事本）里 `RequestEditSession` 基本是同步回调。别的宿主可能不同。
 4. p95 和 max 远大于 p50（服务端 p95 5.6ms、max 97ms），是偶发尖峰，原因没查。可能是首个按键、userdb 写入或其他进程抢 CPU，需要在更干净的条件下重复测。
 
+**场景 A：新程序里的第一个字（台式机，5 个全新记事本进程，各打 `nihao`+空格）**
+
+数据文件 `A_cold.etl`；分析用 `tools/perf/by_pid.py`（按进程拆开，对比"第一个按键"和"后续按键中位数"）。5 个进程的结果几乎一致：
+
+| 阶段 | 第一个按键（5 个进程的范围） | 后续按键中位数 |
+|---|---|---|
+| `tsf.ipc_key_roundtrip` | 2460–2575 µs | 705–741 µs |
+| `tsf.get_response` | 449–467 µs | 408–431 µs |
+| `tsf.do_edit_session` | **34627–37147 µs** | 1342–1796 µs |
+| `ui.do_paint` | 6487–7421 µs | 2994–3474 µs |
+| `ui.present` | 259–284 µs | 189–206 µs |
+
+要点：
+
+1. **第一个按键的 `do_edit_session` 要 35–37ms，后续只要约 1.4ms，相差 25 倍**。这是首字延迟的主要来源。
+2. 这 35ms 里已知的只有 `get_response`（约 0.46ms）和首次 `do_paint`（约 6.5ms，嵌套在里面），**剩下约 28ms 没有被现有计时点覆盖**。可能是候选窗创建、D3D/WARP 设备和 DirectWrite 初始化、TSF 组字的建立，但**这只是推测，没有数据支撑**，需要补 T6（`UI::Update`/`Refresh` 分段）、T8（`StartUI` 预热）才能拆开。
+3. 第一次 IPC 往返是 2.5ms（后续 0.72ms），多出的约 1.8ms 是首次管道使用的开销，相对小。
+4. 台式机上第一个按键到候选框总共约 38ms。笔记本更慢，具体多少没有测，**不能用台式机的数字推算**。
+5. 注意：`StartUI` 里预热（`Refresh()`+`Hide()`）是有意保留的。这个数据显示预热之后第一个按键仍然很慢，要查预热有没有覆盖到全部资源，**但不能因此去掉预热**（`AGENTS.md` 的硬约束）。
+
+**场景 A 续：补 T6、T8 后拆开首字的 35ms（台式机，5 个新记事本进程，`A2_cold.etl`）**
+
+新增计时点（只加计时，无行为改动）：`tsf.start_ui`（及 `.begin_element`、`.make_window`、`.warmup`，`CandidateList.cpp:286`）、`tsf.start_composition`（`Composition.cpp:63`）、`tsf.update_ui`（`CandidateList.cpp:369`）、`ui.update`（`WeaselUI.cpp:55`）、`ui.create`（及 `.window/.d2d_ctor/.attach/.dwrite_init`）、`ui.refresh`（及 `.d2d_attach/.dwrite_init/.layout/.resize/.reposition/.redraw`）、`ui.device_init`（及 `.d3d11/.dxgi_d2d_dcomp/.dwrite_wic`，`d2d.cpp:32`）。`WeaselPerf.h` 新增 `Mark()`/`Lap()` 辅助。分析脚本 `tools/perf/by_pid.py`，另有一份按进程列出"第一个按键"各阶段的临时脚本（未入库）。
+
+第一个按键里各阶段耗时，5 个进程的中位数，单位 ms（括号内为 5 个进程的范围）：
+
+| 阶段 | 耗时 | 说明 |
+|---|---|---|
+| `tsf.do_edit_session` | ≈ 36.5（35.2–66.3） | 第一个按键的编辑会话，后续按键中位数 1.5 |
+| └ `tsf.start_composition` | ≈ 35.2（33.9–38.4） | 几乎占满上面的 36.5 |
+| &nbsp;&nbsp;└ `tsf.start_ui` | ≈ 27.7（26.9–31.4） | |
+| &nbsp;&nbsp;&nbsp;&nbsp;├ `begin_element` | ≈ 0.08 | 可忽略 |
+| &nbsp;&nbsp;&nbsp;&nbsp;├ `make_window` | ≈ 24.6（24.1–26.9） | |
+| &nbsp;&nbsp;&nbsp;&nbsp;│ ├ `ui.device_init` | ≈ 17.2（16.8–18.5） | 进程内只做一次，D3D11 WARP 设备 ≈ 10.9，DXGI/D2D/DComp ≈ 3.2，DirectWrite/WIC ≈ 3.0 |
+| &nbsp;&nbsp;&nbsp;&nbsp;│ └ `ui.create` | ≈ 7.4（7.1–8.4） | 建窗口 ≈ 1.2，`D2D::AttachWindow`（交换链、DComp）≈ 3.1，DirectWrite 字体格式 ≈ 2.9 |
+| &nbsp;&nbsp;&nbsp;&nbsp;└ `warmup`（`Refresh`+`Hide`）| ≈ 3.0（2.7–4.4） | 其中布局 ≈ 1.5，调整窗口 ≈ 1.2 |
+| &nbsp;&nbsp;`start_composition` 里 `start_ui` 之外 | ≈ 7.5 | **没有被覆盖**，包括创建编辑会话对象和 `RequestEditSession` 里宿主的同步工作 |
+
+之后在别的回调里还有：首次 `tsf.update_ui` ≈ 6.1（后续 0.2），首次 `ui.do_paint` ≈ 6.6（后续 3.1）。台式机上从第一个按键到候选框完全画出来，粗算约 2.4 + 36 + 6 + 6.6 ≈ 50ms（各段在不同回调里串行，未精确对齐，仅作量级参考）。
+
+**关键发现**
+
+1. **`StartUI`（含"预热"）是从 `_StartComposition`（`Composition.cpp:68`）调用的，即第一次组字时才执行，而不是"获得焦点就预热"。** 这和 `AGENTS.md` 第 2 节、`initial task.txt` 里"获得焦点就预热"的说法**不一致，以代码为准**。数据也支持：预热就发生在第一个按键里。
+2. 35ms 里最大的一块是 **`ui.device_init` ≈ 17ms，而它与具体窗口无关**（`DeviceResources` 是进程内单例）。其中仅 `D3D11CreateDevice(WARP)` 就 ≈ 11ms。
+3. `ui.create` 里 `D2D` 构造为 0：`m_pD2D` 在 `Create` 之前已经建好，设备初始化在更早的 `D2D` 构造里发生，但仍然在 `make_window` 之内。
+4. `ui.refresh.redraw` 只有约 0.03ms，`RedrawWindow` 不会同步绘制，真正的绘制在之后的 `WM_PAINT` 里（`ui.do_paint`）。
+5. 异常值：进程 2 的 `do_edit_session` 达到 66ms（其余 35–37ms），进程 1、2 的首次 IPC 往返是 8.7–10.5ms（其余 2.4ms），原因没查，样本太小。
+6. 现有"预热"是有意保留的（`AGENTS.md` 硬约束），但它**没有起到提前准备的作用**，因为它发生在第一个按键里。这是一个优化机会：把与窗口无关的 `ui.device_init`（约 17ms）提前到进程获得焦点或 TSF 激活时，**要先出方案，不直接改**：它涉及在宿主进程里什么时候、哪个线程创建 D3D 设备，属于 `AGENTS.md` 要求先出方案的高风险改动。
+
 **还没验证的**
 
 1. 没有测过开启和关闭 ETW 时的额外开销。

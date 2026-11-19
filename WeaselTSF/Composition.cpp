@@ -62,6 +62,7 @@ STDMETHODIMP CStartCompositionEditSession::DoEditSession(TfEditCookie ec) {
 
 void WeaselTSF::_StartComposition(com_ptr<ITfContext> pContext,
                                   BOOL fCUASWorkaroundEnabled) {
+  WEASEL_PERF_SCOPE("tsf.start_composition");
   com_ptr<CStartCompositionEditSession> pStartCompositionEditSession;
   pStartCompositionEditSession.Attach(
       new CStartCompositionEditSession(this, pContext, fCUASWorkaroundEnabled));

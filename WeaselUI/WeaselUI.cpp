@@ -77,6 +77,7 @@ void UI::UpdateInputPosition(RECT const& rc) {
 void UI::Update(const Context& ctx, const Status& status) {
   if (ctx_ == ctx && status_ == status)
     return;
+  WEASEL_PERF_SCOPE("ui.update");
   ctx_ = ctx;
   status_ = status;
   if (style_.candidate_abbreviate_length > 0) {

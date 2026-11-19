@@ -46,6 +46,19 @@ inline void Emit(const char* stage, LONGLONG t0) {
                     TraceLoggingInt64(us, "us"));
 }
 
+// Sequential laps inside one function: take a mark, then call Lap() after each
+// step. Lap() emits (now - mark) under the given name and restarts the mark.
+// When tracing is disabled the mark is 0 and Lap() does nothing.
+inline LONGLONG Mark() {
+  return Enabled() ? Now() : 0;
+}
+inline void Lap(const char* stage, LONGLONG& mark) {
+  if (mark) {
+    Emit(stage, mark);
+    mark = Now();
+  }
+}
+
 // Measures the time between construction and destruction.
 class Scope {
  public:

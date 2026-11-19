@@ -3,6 +3,7 @@
 #include "WeaselTSF.h"
 #include "CandidateList.h"
 #include <KeyEvent.h>
+#include <WeaselPerf.h>
 #include <math.h>
 
 using namespace std;
@@ -286,6 +287,8 @@ HRESULT CCandidateList::_UpdateUIElement() {
 void CCandidateList::StartUI() {
   if (_uiStarted)
     return;
+  WEASEL_PERF_SCOPE("tsf.start_ui");
+  LONGLONG perf_lap = weasel::perf::Mark();
 
   com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
   if (!pThreadMgr) {
@@ -308,16 +311,19 @@ void CCandidateList::StartUI() {
     });
   if (FAILED(pUIElementMgr->BeginUIElement(this, &_pbShow, &uiid)))
     return;
+  weasel::perf::Lap("tsf.start_ui.begin_element", perf_lap);
   _uiStarted = true;
   // pUIElementMgr->UpdateUIElement(uiid);
   if (_pbShow) {
     _ui->style() = _style;
     _MakeUIWindow();
+    weasel::perf::Lap("tsf.start_ui.make_window", perf_lap);
     if (!_ui_warmed_up && _ui->hwnd() != nullptr) {
       // Warm up render resources before first visible paint in TSF path.
       _ui->Refresh();
       _ui->Hide();
       _ui_warmed_up = true;
+      weasel::perf::Lap("tsf.start_ui.warmup", perf_lap);
     }
   }
 }
@@ -367,6 +373,7 @@ void CCandidateList::_MakeUIWindow() {
 }
 
 void WeaselTSF::_UpdateUI(const Context& ctx, const Status& status) {
+  WEASEL_PERF_SCOPE("tsf.update_ui");
   _cand->UpdateUI(ctx, status);
 }
 
