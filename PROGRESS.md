@@ -227,6 +227,21 @@ x64、x86 均编译通过，0 错误。我改动的文件里没有新警告（`d
 
 局限：这是合成负载，不是真实的候选窗绘制（真实 `ui.do_paint` 中位数约 3.1ms，包含圆角、阴影、图标等更多 D2D 调用）。**真实候选窗里省多少，要把 `d2d.cpp:81` 改成 `D2D1_DEBUG_LEVEL_NONE` 后重新抓 `ui.do_paint` 才知道，这一步还没做。** DirectWrite 的布局（`ui.refresh.layout` ≈ 2.7ms）不受 D2D 调试级别影响。
 
+**把 `d2d.cpp:81` 改成 `D2D1_DEBUG_LEVEL_NONE` 后的真实候选窗数据（台式机，同一个记事本内连续打词，`M4_multi.etl` 对比 `M3_multi.etl`）**
+
+改动：`WeaselUI/d2d.cpp:81`，`D2D1_DEBUG_LEVEL_INFORMATION` → `D2D1_DEBUG_LEVEL_NONE`，一行。x64、x86 编译通过，0 错误，只重编了这个文件，5 条原有警告。注意：用 `sed -i` 改会改变整个文件的换行符（diff 1006 行全变），应该用编辑工具只改那一行。
+
+| 阶段 | M3（INFORMATION，无预热） | M4（NONE，有预热） |
+|---|---|---|
+| `ui.do_paint` p50 / p95 | 3379 / 4133 µs（n=37） | **1736 / 2162 µs（n=48）** |
+| `ui.present` p50 | 185 µs | 195 µs（不变） |
+| `ui.refresh.layout` p50 | 2646 µs | 2423 µs（DirectWrite，不受 D2D 调试级别影响，差异视为波动） |
+| `tsf.get_response` p50 | 412 µs | 422 µs（不变） |
+
+`ui.do_paint` 中位数 **3.38ms → 1.74ms，减少约 49%**，p95 也从 4.13ms 降到 2.16ms。A3（有预热、INFORMATION）里的后续按键 `do_paint` 中位数是 3.08ms，和 M3 一致，所以这个差异来自调试级别，不是预热。验证：改后新启动的记事本（PID 5428）里 `D3D10Warp.dll` 已加载，`D2D1Debug3.dll` 没有加载。
+
+局限：M3 是预热之前的构建，M4 是预热之后，所以 `start_ui`、`ui.create` 等不能直接比，这里只比较和预热无关的 `do_paint`。M4 里打了 8 个词，M3 是 6 个，次数不同。台式机上的数字，目标笔记本上没测，`D2D1Debug3.dll` 是否存在也没验证。
+
 **还没验证的**
 
 1. 目标笔记本上的焦点卡顿（`tsf.prewarm_graphics`）和首键延迟没测。

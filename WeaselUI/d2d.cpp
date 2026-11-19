@@ -78,7 +78,7 @@ HRESULT DeviceResources::EnsureInitialized() {
       reinterpret_cast<void**>(dxFactory.ReleaseAndGetAddressOf()));
   if (FAILED(hr))
     return hr;
-  D2D1_FACTORY_OPTIONS const options = {D2D1_DEBUG_LEVEL_INFORMATION};
+  D2D1_FACTORY_OPTIONS const options = {D2D1_DEBUG_LEVEL_NONE};
   hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, options,
                          d2Factory.ReleaseAndGetAddressOf());
   if (FAILED(hr))
