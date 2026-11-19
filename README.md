@@ -1,117 +1,56 @@
-﻿【小狼毫】輸入法
-================
+# Lite_weasel —— 给老电脑用的丝滑小狼毫
 
-基於 中州韻輸入法引擎／Rime Input Method Engine 等開源技術
+**Lite_weasel** 是 [小狼毫（Weasel）](https://github.com/rime/weasel) 的一个改良版。小狼毫是 Windows 上的 Rime 输入法。
 
-式恕堂 版權所無
+这个版本只想解决一个问题：**让小狼毫在老旧、低配的笔记本上打字也顺滑。**
 
-[![Download](https://img.shields.io/github/v/release/rime/weasel)](https://github.com/rime/weasel/releases/latest)
-[![Build status](https://github.com/rime/weasel/actions/workflows/commit-ci.yml/badge.svg)](https://github.com/rime/weasel/actions/workflows/commit-ci.yml)
-[![GitHub Tag](https://img.shields.io/github/tag/rime/weasel.svg)](https://github.com/rime/weasel)
+## 为什么要做这个？
 
-授權條款：GPLv3
+在 ThinkPad X220、X1 Carbon 5 代这类老机器上用小狼毫，常会遇到这些情况：
 
-項目主頁：https://rime.im
+- 在新打开的程序里打第一个字时，**候选框要顿一下才出来**
+- 打字快的时候，**候选框跟不上，感觉粘手**
+- 输入法后台在更新词库时，**打字明显变卡**
+- 偶尔输入法"卡住"，**连带正在用的软件一起没反应**
 
-您可能還需要 RIME 用於其他操作系統的發行版：
+原因主要有这几个：
 
-  * ibus-rime、fcitx5-rime 或 fcitx-rime 用於 Linux
-  * 【鼠鬚管】用於 macOS （64位）
+1. 输入法会被"装进"你打开的每个程序里。它画候选框时可能会拉起显卡驱动，这个驱动又大又慢。
+2. 输入法后台进程抢不到 CPU。
+3. 程序和输入法后台之间"传话"时，如果后台忙，前台只能干等。
 
-安裝輸入法
-----------
+## 我们做了什么（及计划做什么）
 
-本品適用於 Windows 8.1 ~ Windows 11
+> **重要说明**：下面所有"快了多少"的数字，都是在一台**配置很好的台式机**上测的，**还没有在老笔记本上测过**。老机器上效果如何，要等实测。
 
-初次安裝時，安裝程序將顯示「安裝選項」對話框。
+| 改进 | 用大白话说 | 状态 |
+|---|---|---|
+| 候选框用 CPU 画（不动用显卡驱动） | 上游小狼毫本来就这样做；我们只验证了在记事本里确实只加载软件渲染组件，没有系统性检查其他程序 | ✅ 沿用，未改动 |
+| 候选框画得更省力 | 去掉了一个只在调试时才有用的检查，每次重绘的时间从约 3.4 毫秒降到约 1.7 毫秒 | ✅ 已完成（台式机实测） |
+| 提前准备好绘制环境 | 一到输入框就提前把候选框要用的绘制环境准备好，新程序里第一个字的处理时间从约 36 毫秒降到约 19 毫秒；代价是每个程序多占约 4MB 内存，第一次切到它时会多等约 17 毫秒 | ✅ 已完成（台式机实测） |
+| 防止输入法拖死程序 | 后台输入法服务卡住时，不再让正在用的程序一直干等：每次最多等约四分之一秒，连续没反应就暂时放弃，按键直接当英文字母打出来，后台恢复后自动回来。模拟卡住 4 秒，程序被卡的时间从"一直卡到恢复"降到合计不到 1 秒 | ✅ 已完成（台式机模拟验证） |
+| 提高输入法后台的优先级 | 让输入法优先拿到 CPU，更新词库时则主动让路 | 📋 还没做，要先测量部署期间打字的情况 |
+| 更多提速 | 我们发现新程序里第一个按键在后台的耗时取决于你的词库大小（一台机器上从 0.3 毫秒到近 9 毫秒），还没查清是哪一部分造成的；另外每个按键都先确认一次后台在不在，也想精简 | 📋 等笔记本上的实测数据再决定 |
 
-若要將【小狼毫】註冊到繁體中文（臺灣）鍵盤佈局，請在「輸入語言」欄選擇「中文（臺灣）」，再點擊「安裝」按鈕。
+**使用这个版本时你会遇到的变化**：
+- 后台输入法服务**卡住的时候**，输入法会暂时"消失"，你打的拼音字母会直接变成英文字母出现在文档里；后台恢复后（一般几秒内）自动恢复，不需要手动操作。
+- 装这个版本之后，输入法后台**第一次启动会重新部署一次**你的词库配置（只是重新生成缓存，你的词库和配置不会被改动）。
+- 这个版本**没有签名**，是用来测试的版本，不是正式发行版。
 
-安裝完成後，仍可由開始菜單打開「安裝選項」更改輸入語言。
+详细进展、数据和遇到的坑见 [`PROGRESS.md`](PROGRESS.md)。
 
-使用輸入法
-----------
+## 你自己现在就能做的提速小技巧
 
-選取輸入法指示器菜單裏的【中】字樣圖標，開始用小狼毫寫字。
+这些不需要等新版本：
 
-可通過快捷鍵 <kbd>Ctrl+`</kbd> 或 <kbd>F4</kbd> 呼出方案選單、切換輸入方式。
+1. **关掉候选框阴影**：在配色方案里把 `shadow_radius` 设成 `0`。阴影是 CPU 绘制，理论上在老电脑上更耗时（**我们还没有实测过它的开销**，这是建议，不是测量结果）。
+2. **让杀毒软件放过输入法**：在 Windows 安全中心把 `%APPDATA%\Rime` 和小狼毫的安装目录加进"排除项"（同样是建议，没有实测）。
+3. **精简输入方案**：少挂几个词库，关掉用不上的 Lua 脚本、emoji 和繁简转换，每页候选数也别设太多。我们实测过一个现象：同一台电脑上，新程序里第一个按键在后台的耗时，在用户的真实词库配置下约 8 毫秒，换成干净的标准词库只要约 0.3 毫秒（具体是自定义词库、用户词库还是别的造成的，还没查清）。
 
-定製輸入法
-----------
+## 安装和编译
 
-通過 開始菜單 » 小狼毫輸入法 訪問設定工具及常用位置。
+本项目的编译方式和原版小狼毫一样，请参考 [`INSTALL.md`](INSTALL.md)。需要 Visual Studio 2022、Boost 和 librime。
 
-用戶詞庫、配置文件位於 `%AppData%\Rime`，可通過菜單中的「用戶文件夾」打開。高水平玩家調教 Rime 輸入法常會用到。
+## 致谢
 
-修改詞庫、配置文件後，須「重新部署」方可生效。
-
-定製 Rime 的方法，請參考 Wiki [《定製指南》](https://github.com/rime/home/wiki/CustomizationGuide)。如需定製 Weasel 獨有的樣式和行為，請參考本倉庫 [Wiki 頁面](https://github.com/rime/weasel/wiki)。
-
-致謝
-----
-
-### 輸入方案設計：
-
-  * 【朙月拼音】系列及【八股文】詞典
-    - 部分數據來源於 CC-CEDICT、Android 拼音、新酷音、opencc 等開源項目
-    - 維護者：佛振、瑾昀
-  * 【注音／地球拼音】
-    - 維護者：佛振、瑾昀
-  * 【倉頡五代】
-    - 發明人：朱邦復先生
-    - 碼表源自 www.chinesecj.com
-    - 構詞碼表作者：惜緣
-
-  【五笔】【粵拼】【上海／蘇州吳語】【中古漢語拼音】【國際音標】等衆多方案
-  不再以安裝包預裝形式提供。可由 <https://github.com/rime/plum> 下載安裝。
-
-### 程序設計：
-
-  * [佛振](https://github.com/lotem)
-  * [鄒旭](https://github.com/zouxu09)
-  * [Xiangyan Sun](https://github.com/wishstudio)
-  * [Prcuvu](https://github.com/Prcuvu)
-  * [nameoverflow](https://github.com/nameoverflow)
-  * [fxliang](https://github.com/fxliang)
-  * [Azuk 443](https://github.com/determ1ne)
-
-  查看更多 [代碼貢獻者](https://github.com/rime/weasel/graphs/contributors)
-
-### 美術：
-
-  * 圖標設計／[Patricivs](https://github.com/Patricivs)
-  * 配色方案／Aben、P1461、Patricivs、skoj、佛振、五磅兔
-
-### 本品引用了以下開源軟件：
-
-  * [Boost C++ Libraries](http://www.boost.org/) (Boost Software License)
-  * [curl](https://curl.haxx.se/) (MIT/X derivate license)
-  * [google-glog](https://github.com/google/glog) (BSD 3-Clause License)
-  * [Google Test](https://github.com/google/googletest) (BSD 3-Clause License)
-  * [LevelDB](https://github.com/google/leveldb) (BSD 3-Clause License)
-  * [librime](https://github.com/rime/librime) (BSD 3-Clause License)
-  * [marisa-trie](https://github.com/s-yata/marisa-trie) (BSD 2-Clause License, LGPL 2.1)
-  * [OpenCC / 開放中文轉換](https://github.com/BYVoid/OpenCC) (Apache License 2.0)
-  * [plum](https://github.com/rime/plum) (GNU Lesser General Public License v3.0)
-  * [WinSparkle](https://github.com/vslavik/winsparkle) (MIT License)
-  * [yaml-cpp](https://github.com/jbeder/yaml-cpp) (MIT License)
-  * [7-Zip](https://www.7-zip.org) (GNU LGPLv2.1+ with unRAR restriction)
-
-問題與反饋
-----------
-
-發現程序有 bug，請到 GitHub 反饋
-<https://github.com/rime/weasel/issues>
-
-歡迎提交 pull request
-<https://github.com/rime/weasel/pulls>
-
-Rime 輸入法（不限於 Windows 平臺）功能、使用方法與配置相關的問題，請反饋到
-<https://github.com/rime/home/issues>
-
-聯繫方式
---------
-
-技術交流，歡迎光臨 [Rime 代碼之家](https://github.com/rime/home)，或致信 Rime 開發者 <rimeime@gmail.com>
-
-謝謝！
+感谢 [Rime](https://rime.im) 和小狼毫的所有开发者。本项目沿用原项目的开源许可证（GPLv3），详见 `LICENSE.txt`。
