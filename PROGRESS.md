@@ -209,6 +209,24 @@ x64、x86 均编译通过，0 错误。我改动的文件里没有新警告（`d
 3. 这是单进程、台式机、x64 的数字。真实宿主里已经加载了部分 DLL 的情况（浏览器、Office 等）增量会更小。x86 和笔记本上没测。
 4. **环境坑**：从 Claude 的工具进程里直接启动的程序没有交互式桌面权限，`DCompositionCreateDevice` 会返回 `0x80070005`（拒绝访问），第一次测试因此失败，数字作废；之前启动的 `notepad` 没有出现在桌面上也是同一原因。解决办法：用 `schtasks /create ... /ru <用户> /it` 创建计划任务，在用户的交互式会话里运行，再删除任务。
 
+**D2D 调试级别 `D2D1_DEBUG_LEVEL_INFORMATION` 的开销（台式机，x64，独立对照程序 `tools/perf/d2ddbg.cpp`，每种各 5 个新进程）**
+
+代码事实：`WeaselUI/d2d.cpp:81` 创建 D2D 工厂时用 `D2D1_DEBUG_LEVEL_INFORMATION`（仓库里输入路径上只有这一处；`WeaselDeployer/FontSettingDialog.h:166` 在设置界面里，不在输入路径上）。该级别会让 D2D 加载调试层 `D2D1Debug3.dll`，对每次 D2D 调用做参数校验和调试输出。
+
+对照程序：同一个 WARP 设备，只改工厂的调试级别；每帧：`Clear` + `FillRoundedRectangle` + 6 次 `CreateTextLayout`/`GetMetrics`/`DrawTextLayout`，跑 400 帧取中位数和 p95。
+
+| 指标 | `NONE` | `INFORMATION` | 差异 |
+|---|---|---|---|
+| 工厂创建 | 0.04–0.05 ms | 0.66–0.74 ms | +0.6 ms |
+| 每帧耗时 p50 | 0.181–0.186 ms | 0.413–0.418 ms | **+0.23 ms（约 2.2 倍）** |
+| 每帧耗时 p95 | 0.249–0.280 ms | 0.485–0.496 ms | +0.23 ms |
+| 创建后工作集增量 | 1.59–1.60 MB | 2.38–2.40 MB | +0.8 MB |
+| 加载 `D2D1Debug3.dll` | 否 | 是 | |
+
+5 轮结果几乎相同，差异远大于噪声。
+
+局限：这是合成负载，不是真实的候选窗绘制（真实 `ui.do_paint` 中位数约 3.1ms，包含圆角、阴影、图标等更多 D2D 调用）。**真实候选窗里省多少，要把 `d2d.cpp:81` 改成 `D2D1_DEBUG_LEVEL_NONE` 后重新抓 `ui.do_paint` 才知道，这一步还没做。** DirectWrite 的布局（`ui.refresh.layout` ≈ 2.7ms）不受 D2D 调试级别影响。
+
 **还没验证的**
 
 1. 目标笔记本上的焦点卡顿（`tsf.prewarm_graphics`）和首键延迟没测。
