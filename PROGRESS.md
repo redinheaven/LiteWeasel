@@ -4,6 +4,102 @@
 
 ---
 
+## 2026-11-19 · 乱敲键盘极卡的根因：首字母简拼规则 × 臃肿的用户词库（台式机，只读排查）
+
+**状态：已复现并定位，没有改任何代码或用户真实词库。**
+
+- 复现（`tools/perf/gib_bench.cpp`，用户目录的临时副本，Idle 优先级）：依次敲 `dajkhdsdhajhq`（13 键），每键 `process_key` 耗时随长度近似线性涨：第 5 键 27ms → 第 8 键 113ms → 第 13 键 **179ms**，13 键合计 **1088ms**；`get_context` 始终只有约 0.2ms，**慢在 librime 搜索，不在候选窗绘制**。同样的原版方案副本合计仅 **59ms**。
+- 二分结果（13 键合计）：
+
+| 配置 | 合计 |
+|---|---|
+| 用户完整配置 | 1088ms |
+| 关 `enable_correction` | 965ms（不是主因） |
+| 去掉两条 `abbrev` 或仅去掉首字母简拼 `abbrev/^([a-z]).+$/$1/` | 约 15ms |
+| 去掉 `derive` 规则 | 1110ms（不是主因） |
+| 原版方案 + 简拼规则 | 60ms |
+| 原版方案 + 简拼规则 + `user_dict: luna_pinyin_simp` | **945ms** |
+| 原版方案 + 简拼规则 + 用户自定义词典 `luna_pinyin.my`（28MB 表） | 75ms |
+| 用户完整配置但**清空用户词库** | **91ms** |
+
+- **结论**：首字母简拼让每个字母都能当一个音节，乱敲时切分方案指数膨胀；每个切分都要去 `luna_pinyin_simp.userdb` 里查，词库越大越慢。**单看规则或单看词库都不慢，两者相乘才慢。**
+- **用户词库的状态**：`%APPDATA%\Rime\luna_pinyin_simp.userdb` 30.3MB，导出 `userdb.txt` 有 **492,063 条**，其中 **398,085 条（81%）提交次数 c=1**，且大量条目 `t=149759`/`t=26881` 等时间戳完全相同，看起来像批量导入的整句（如 `a bang xiao xiao jia yuan duo fei zuan shi ren sheng`），不像逐字打出来的。正常用户词库通常只有几万条。
+- 正常拼音（`nihaoshijie`）11 键合计约 117ms，最慢一键约 63ms（也受这个词库影响），不过只有乱敲时才会显著感知。
+- 未做：清理真实用户词库（需先 `WeaselServer.exe /q` 并备份，见 `AGENTS.md` 第 4 节第 9 条）；未在笔记本上测（笔记本上绝对值会更大）。
+- 候选修复：(a) 清理 c=1 的批量导入条目（保留用户词库 c≥2 的）；(b) 去掉首字母简拼规则（失去 `nh`→你好 的输入方式）；(c) 服务端限制输入串长度。**用户决定：保留简拼，做 (c)，上限 16，超限静默忽略。(a) 尚未做。**
+
+### 追加：卸载列表里的"发布者"改为 `GitHub`（已打包并安装到本机，未提交）
+
+- 改动：`output/install.nsi:314`，`Publisher` 由 `式恕堂` 改为 `GitHub`。没有改 `CompanyName`（`install.nsi:33`，安装包 exe 文件属性里的"公司"，仍是 `式恕堂`）。
+- 验证：重新打包 `LiteWeasel-0.17.4.0.publisher-installer.exe` 并静默安装；注册表 `HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Weasel` 读到 `Publisher=GitHub`、`DisplayName=LiteWeasel`、`DisplayVersion=0.17.4.0`；服务端哈希与 `output\` 一致，词库未动。注意：卸载项因 `SetRegView 32` 写在 `Wow6432Node` 下，查 64 位视图的 `Uninstall\Weasel` 会找不到。
+
+### 追加：图标改为低饱和度配色（已编译、已打包、已安装到本机，未提交）
+
+- 改动：`tools/gen_icons.py` 的调色板：主色 `#0891B2`（HSV 饱和度约 95%）→ `#4F7F8C`（约 44%）；点缀点 `#67E8F9` → `#B5D3D9`；英文模式底色 `#334155` → `#424B59`；维护/刷新琥珀色 `#D97706`（约 97%）→ `#A98056`（约 49%）。几何形状不变。重新生成了 `resource/{weasel,zh,en,full,half,reload}.ico` 和 `WeaselSetup/WeaselSetup.ico`。
+- 范围：托盘图标（`zh/en/full/half/reload`）、主图标 `weasel.ico`（`WeaselServer.exe`、`weasel.dll`、`WeaselDeployer.exe` 的图标）、`WeaselSetup.exe` 图标，以及安装包 exe 图标（`output/install.nsi:38` 的 `MUI_ICON` 指向 `resource/weasel.ico`，打包时嵌入，没改 `.nsi`）。
+- 验证：生成前后对比图目视确认；16/32px 下中文（青灰）与英文（深石板）仍可一眼区分；白色字形对比度按亮度估算约 3~4.4。编译：x64（`WeaselTSF`、`WeaselServer`、`WeaselDeployer`）与 Win32（再加 `WeaselSetup`）均 0 错误；`WeaselDeployer.rc` 里 6 条 `RC2182`（对话框控件 ID 0 重复）是该文件本来就有的，之前没出现在日志里只是因为这个 `.rc` 一直没被重新编译。用 `ExtractAssociatedIcon` 从新安装包 `LiteWeasel-0.17.4.0.softicons-installer.exe` 和已安装的 `WeaselServer.exe` 取出图标，确认是新配色。已安装，文件哈希与 `output\` 一致，词库未动（`luna_pinyin_simp.userdb` 仍 30.3MB）。
+- 注意：已运行的程序仍在用内存里的旧 `weasel.dll`，语言栏里的输入法图标要重开程序或注销后才更新；资源管理器可能缓存旧的 exe 图标。
+
+### 追加：候选窗字体路径的冷启动代价（只读测量，台式机，没有改代码）
+
+- 读代码：`D2D::GetOrCreateTextFormat`（`WeaselUI/d2d.cpp:360`）先用 `_InvalidFontName_` 建 `TextFormat`，再由 `SetFontFallback`（`:555`）用 `IDWriteFontFallbackBuilder` 把用户字体放进回退链，**真正的字体要到第一次 `CreateTextLayout`/排版时才解析加载**。`textFormatCache` 是每个 `D2D` 实例的成员（`d2d.h:170`），候选窗每次组字重建，所以每次组字都要重建 `TextFormat` 和回退链。`PrewarmGraphics`（`DeviceResources::EnsureInitialized`）只创建 D3D/D2D/DComp 设备、`IDWriteFactory2`、WIC，**没有碰字体**。
+- 测量（`tools/perf/dwrite_cold.cpp`，复刻上面这条链路；全新进程 12 次取中位数，Idle 优先级，字体 Microsoft YaHei 14pt，文件缓存是热的）：第一轮（建格式 2.14ms + 建回退链 0.84ms + 首次排版 1.74ms）**合计 4.72ms**；同一进程里第二轮**合计 0.90ms**。即**进程里第一次组字多付约 3.8ms**，之后每次组字重建约 0.9ms。
+- 结论：台式机上 3.8ms 感知不到，**不做预热**。未知的是笔记本冷缓存（`msyh.ttc` 要从机械硬盘或慢 SSD 读）：那时首次排版可能远大于 1.74ms。**这个工具可以直接拿到笔记本上，开机后第一次运行**，输出 `factory,fmt1,fallback1,layout1,fmt2,fallback2,layout2`（毫秒）；若 `layout1` 达到几十毫秒以上，再做"获得焦点时顺带预热一次字体"。
+
+### 追加：慢键保护（`slow_key_ms`）与"高性价比项"排查（已编译并安装，未提交）
+
+- **为什么**：按键 IPC 超时是 250ms（`WeaselIPC/WeaselClientImpl.cpp:226`）。台式机乱敲最慢一键 167~244ms；若笔记本慢 2~3 倍就会超时，客户端断管并触发熔断，之后按键变成英文字母。**这是按已测数据和代码推出来的，没有在笔记本上复现。** 另外实测正常长拼音在超过 16 个字母后也会出现 230~330ms 的尖峰（`zhongguorenmindahuitangzhaokai` 第 17、20、24、25、28 键），16 的上限对正常输入也是保护。
+- **改动**：`RimeWithWeasel/RimeWithWeasel.cpp`（`ProcessKeyEvent`）：字母键的 `process_key` 超过 `m_slow_key_ms`（默认 150，`weasel.yaml` 的 `slow_key_ms`，`0` 关闭）后，把该会话记入 `m_slow_sessions`；之后同一次组字里再来的字母键直接吞掉，输入串清空后自动解除。`include/RimeWithWeasel.h` 加 `m_slow_key_ms`、`m_slow_sessions`、`<set>`。该逻辑在 `g_api_mutex` 下执行，无新增并发。
+- **验证**（`tools/perf/gib_bench.cpp` 加了 `cap` 和 `slow_ms` 参数复刻同样判断；用户词库副本；台式机）：
+
+| 输入（40 个乱键） | 总耗时 | 单键最慢 | 被忽略 |
+|---|---|---|---|
+| 无保护 | 7100ms | 263ms | 0 |
+| 上限 16 | 1336ms | 164ms | 24 |
+| 上限 16 + 慢键 150 | 1166ms | 151ms | 25 |
+| 上限 16 + 慢键 100 | 342ms | 117ms | 31 |
+| 正常长拼音 30 字母，上限 16 + 慢键 150 | 108ms | 22ms | 14（超过 16 的部分） |
+| `nihaoshijie`，上限 16 + 慢键 150 | 78ms | 39ms | 0 |
+
+- 取 150 而不是 100 的原因：台式机上正常输入最慢约 40ms，若笔记本慢 3 倍就约 120ms，阈值 100 会误伤正常输入。笔记本上要按实测调。
+- 编译：x64、Win32 Release 均 0 错误，改动文件 0 新增警告。安装包 `output\archives\LiteWeasel-0.17.4.0.slowguard-installer.exe`，已安装到本机，`WeaselServer.exe` 等哈希与 `output\` 一致，词库未动。**同样没有在真实服务端里按键验证。**
+- **第 2 项：闲置/唤醒后第一个字（只量了软缺页）**：`EmptyWorkingSet` 后第一个字 `n` 约 1.4ms → 约 3.3ms（5 次），多出约 2ms，**感知不到，不做唤醒预热**。注意：这只模拟页面还在备用列表的情况，**真正在低内存/机械硬盘笔记本上要从磁盘读回页面的代价没有测**，需要笔记本数据。
+- **第 3 项：维护期间持有全局锁（读代码，没有复现）**：`WeaselServerImpl.cpp:192` 每条管道消息在 `g_api_mutex` 下处理；`EndMaintenance()`→`Initialize()`→`join_maintenance_thread()`（`RimeWithWeasel.cpp:143`）持锁整个部署期间。但维护期间 `m_disabled` 为 true，输入本来就停用（和上游一致），多出来的代价只是前几键各等约 250ms 后熔断放行。**发生频率低、收益小、要改锁结构（高风险），不做**。若以后要做，方案是在 `join_maintenance_thread()` 前后释放/重取 `g_api_mutex`，需要先出设计。
+
+### 实施：输入串长度上限（已编译并安装到本机，未提交）
+
+- 安装：`output\archives\LiteWeasel-0.17.4.0.inputcap-installer.exe`（NSIS，`PRODUCT_VERSION=0.17.4.0.inputcap`）。先 `WeaselServer.exe /q` 再 `/S` 静默安装；安装后 `WeaselServer.exe`、`weasel.dll`、`weaselx64.dll`、`WeaselDeployer.exe` 与 `output\` 哈希一致，新服务端已自动启动；用户词库目录大小不变（`luna_pinyin_simp.userdb` 30.3MB），`RimeUserDir` 未变。注意 PowerShell 的 `Start-Process -Wait` 会连安装程序拉起的服务端一起等，要用不带 `-Wait` 的方式。
+- 上限在服务端生效，不需要重开宿主程序。
+
+- 改动：
+  - `RimeWithWeasel/RimeWithWeasel.cpp:292` 起（`ProcessKeyEvent`）：在调用 `rime_api->process_key` 前，若 `m_max_input_length > 0`、按键是无 Ctrl/Alt/Super/Meta 且非松开的 `a-z/A-Z`、且 `rime_api->get_input()` 长度已 ≥ 上限，直接 `return TRUE`（吞键，不进 librime，也不 `_Respond`/`_UpdateUI`）。退格、空格、回车、数字选词、翻页不受影响。记 ETW 计时点 `srv.rime.input_capped`。
+  - `RimeWithWeasel/RimeWithWeasel.cpp:36-38,168-174`、`include/RimeWithWeasel.h:127`：新成员 `m_max_input_length`，默认 16，从 `weasel.yaml` 的 `max_input_length` 读取（`weasel.custom.yaml` 可覆盖，`0` 表示不限制）。
+- 验证：
+  - 编译：x64 Release、Win32 Release 均通过，0 错误，改动过的文件 0 新增警告（其余警告都在没碰的 `WeaselIPC*`、`WeaselIPCServer*` 老代码里）。
+  - 效果（`tools/perf/gib_bench.cpp` 加上限参数，用与服务端相同的判断逻辑，在用户词库副本上敲 40 个乱键）：**不限制 7373ms（单键最慢 275ms）→ 上限 16：1372ms（单键最慢 167ms）**，第 17 键起均被忽略。
+  - **没有验证真实服务端里这段代码的行为**（没有安装；基准里是复刻了同样的判断，不是服务端本体）。
+- 局限：上限只封顶，**前 16 键里每键仍可能到 150~170ms**（乱敲时每键耗时随长度线性增长）；要根治还得做 (a) 清理用户词库，或再降低上限。正常的长整句（超过 16 个字母）现在需要分段上屏。上限对所有方案生效，包括 `easy_en` 的长英文单词。
+
+---
+
+## 2026-11-19 · 轻量化方向的只读测量（宿主进程里 `weasel.dll` 的依赖与内存，台式机）
+
+**状态：只做了测量，没有改任何代码。**
+
+- 正在加载 `weasel.dll` 的宿主（私有字节 / 工作集）：AutoHotkeyU64 5.6 / 28.8MB、ApplicationFrameHost 7.2 / 30.4MB、WindowsTerminal 89.4 / 94.3MB、explorer 202 / 221MB、chrome 280 / 427MB（宿主自身占用，不是输入法占用）。`WeaselServer.exe` 工作集 72.7MB、私有 14.0MB。
+- **`weasel.dll` 对 `d2d1`、`DWrite`、`d3d11`、`dxgi`、`dcomp`、`dbghelp` 是静态导入，没有延迟加载**（`dumpbin /dependents`）。连没有文本焦点的 AutoHotkey 也映射了这六个库，镜像映射合计约 16MB 地址空间（多为各进程共享的文件页，真实私有开销小）。`D3D10Warp.dll`（约 7MB 映射）只在真正画过候选窗的进程里出现（explorer、WindowsTerminal、ApplicationFrameHost）。
+- **`dbghelp.dll` 只被 `WeaselTSF/dllmain.cpp:6-9,53` 的崩溃转储（`_UnhandledExceptionFilter` → `MiniDumpWriteDump`）用到**，平时用不上，是最没有争议的延迟加载候选。
+- 链接选项里 `WholeProgramOptimization`、`OptimizeReferences` 已开；`WeaselTSF.vcxproj` 里没有 `DelayLoadDLLs`。
+- 安装目录 `weasel.dll`（x86）848KB、`weaselx64.dll` 993KB。
+- **加载代价实测**（`tools/perf/dllcost.cpp`，全新进程、Idle 优先级、12 次取中位数，台式机，文件缓存是热的）：
+  - 直接 `LoadLibrary("weaselx64.dll")`：**13.97ms（最大 20.7ms），私有字节 +1344KB，工作集 +4536KB**。
+  - 单独逐个加载那六个库（顺序 dbghelp→dxgi→d3d11→dwrite→d2d1→dcomp，后加载的共享依赖已被前面带进来，所以逐项数字只能粗看）：dbghelp 1.86ms / 252KB 私有；dxgi 4.59ms / 360KB；dcomp 2.41ms / 132KB；dwrite 1.93ms / 112KB；d2d1 0.81ms / 40KB；d3d11 0.78ms / 40KB。合计约 12.4ms / 936KB 私有，约占 `weaselx64.dll` 加载代价的 90%。
+  - 含义：对**从不获得文本焦点**的进程，延迟加载这六个库能省约 12ms 加载时间和约 0.9MB 私有字节；对会获得焦点的进程没有净节省（预热时照样加载）。**只延迟 `dbghelp` 就能无条件省约 1.9ms / 250KB 私有 / 500KB 工作集，且只涉及崩溃转储路径。**
+  - 局限：台式机、热缓存；老笔记本冷缓存和低频 CPU 下绝对值会更大，未测。
+- 遗留：延迟加载在宿主里的失败路径（`__delayLoadHelper2` 抛 SEH）需要设计方案后再动。
+
+---
+
 ## 2026-11-19 · 当前状态总览（接手时先读这一条）
 
 **目标**：让小狼毫在老笔记本（X1 Carbon 5 代、X220）上打字丝滑：第一个字快、按键响应不粘滞、后台出问题时宿主程序不被拖死。首要取舍：第一个字的速度优先于省内存。
