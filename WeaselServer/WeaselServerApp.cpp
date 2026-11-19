@@ -42,6 +42,13 @@ int WeaselServerApp::Run() {
   LOG(INFO) << "initializing Rime handler";
   m_handler->Initialize();
   LOG(INFO) << "Rime handler initialized";
+  // Raise server priority above normal after initial maintenance finishes so
+  // interactive key processing stays responsive on low-power CPUs (avoid HIGH
+  // so it cannot starve system or foreground threads).
+  const DWORD current_priority = GetPriorityClass(GetCurrentProcess());
+  if (current_priority == NORMAL_PRIORITY_CLASS) {
+    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+  }
   m_handler->OnUpdateUI([this]() { tray_icon.RequestRefresh(); });
 
   LOG(INFO) << "creating tray icon";

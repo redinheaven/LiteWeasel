@@ -111,10 +111,35 @@ void RimeWithWeaselHandler::Initialize() {
   LOG(INFO) << "calling rime_api->initialize";
   rime_api->initialize(NULL);
   LOG(INFO) << "starting Rime maintenance";
-  if (rime_api->start_maintenance(/*full_check = */ False)) {
-    m_disabled = true;
-    LOG(INFO) << "waiting for Rime maintenance";
-    rime_api->join_maintenance_thread();
+  {
+    // librime creates its maintenance worker thread internally inside
+    // start_maintenance(). Temporarily drop the server's process priority class
+    // to BELOW_NORMAL while maintenance runs (no typing is served while
+    // m_disabled is true) so that worker does not starve foreground apps.
+    struct ScopedMaintenancePriority {
+      DWORD prev = 0;
+      ScopedMaintenancePriority() {
+        DWORD cur = GetPriorityClass(GetCurrentProcess());
+        if (cur != 0 && cur != IDLE_PRIORITY_CLASS &&
+            cur != BELOW_NORMAL_PRIORITY_CLASS) {
+          if (SetPriorityClass(GetCurrentProcess(),
+                               BELOW_NORMAL_PRIORITY_CLASS)) {
+            prev = cur;
+          }
+        }
+      }
+      ~ScopedMaintenancePriority() {
+        if (prev != 0) {
+          SetPriorityClass(GetCurrentProcess(), prev);
+        }
+      }
+    } maint_priority;
+
+    if (rime_api->start_maintenance(/*full_check = */ False)) {
+      m_disabled = true;
+      LOG(INFO) << "waiting for Rime maintenance";
+      rime_api->join_maintenance_thread();
+    }
   }
 
   RimeConfig config = {NULL};
