@@ -28,6 +28,8 @@ class ClientImpl {
   void FocusOut();
   void TrayCommand(UINT menuId);
   bool GetResponseData(ResponseHandler const& handler);
+  // True while the process-wide circuit breaker refuses requests.
+  static bool Suspended();
 
  protected:
   void _InitializeClientInfo();

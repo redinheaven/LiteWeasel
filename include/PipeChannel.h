@@ -22,12 +22,17 @@ class PipeChannelBase {
     bool response_valid;
     // Manual-reset event used for this thread's overlapped client I/O.
     HANDLE io_event;
+    // Set by _Connect() when it gave up because every pipe instance stayed
+    // busy for the whole connect budget (the server is there but unresponsive),
+    // as opposed to the pipe not existing at all (no server).
+    bool connect_timed_out;
 
     ChannelContext(size_t bs)
         : buffer(std::make_unique<char[]>(bs)),
           has_body(false),
           response_valid(true),
-          io_event(::CreateEventW(NULL, TRUE, FALSE, NULL)) {}
+          io_event(::CreateEventW(NULL, TRUE, FALSE, NULL)),
+          connect_timed_out(false) {}
     ~ChannelContext() {
       if (io_event)
         ::CloseHandle(io_event);
@@ -155,13 +160,17 @@ class PipeChannel : public PipeChannelBase {
     if (timeoutMs == kSyncIo)
       timeoutMs = INFINITE;
     _GetContext()->response_valid = false;
-    // Fail fast when there is no connection (e.g. the connect budget ran out)
-    // instead of trying to write to an invalid handle and reconnecting again.
-    if (!_Ensure())
-      throw static_cast<DWORD>(ERROR_PIPE_NOT_CONNECTED);
     HANDLE* phandle = _GetPipeHandle();
     const ULONGLONG start = ::GetTickCount64();
     try {
+      // Fail fast when there is no connection instead of trying to write to an
+      // invalid handle and reconnecting again. ERROR_TIMEOUT means the pipe is
+      // there but stayed busy for the whole connect budget; ERROR_PIPE_NOT_
+      // CONNECTED means it does not exist.
+      if (!_Ensure())
+        throw static_cast<DWORD>(_GetContext()->connect_timed_out
+                                     ? ERROR_TIMEOUT
+                                     : ERROR_PIPE_NOT_CONNECTED);
       _Send(*phandle, msg, timeoutMs);
       DWORD remaining = timeoutMs;
       if (timeoutMs != INFINITE) {

@@ -43,11 +43,14 @@ HANDLE PipeChannelBase::_Connect(const wchar_t* name) {
   // a free instance, but never forever: a host UI thread may be calling this.
   constexpr ULONGLONG kConnectBudgetMs = 250;
   const ULONGLONG deadline = ::GetTickCount64() + kConnectBudgetMs;
+  _GetContext()->connect_timed_out = false;
   HANDLE pipe = INVALID_HANDLE_VALUE;
   while (_Invalid(pipe = _TryConnect())) {
     const ULONGLONG now = ::GetTickCount64();
-    if (now >= deadline)
+    if (now >= deadline) {
+      _GetContext()->connect_timed_out = true;
       return INVALID_HANDLE_VALUE;
+    }
     ::WaitNamedPipe(name, static_cast<DWORD>(deadline - now));
   }
   DWORD mode = PIPE_READMODE_MESSAGE;

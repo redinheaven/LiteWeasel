@@ -247,6 +247,11 @@ void WeaselTSF::_Reconnect() {
 static unsigned int retry = 0;
 
 bool WeaselTSF::_EnsureServerConnected() {
+  // The server stopped answering and the circuit breaker is open: do not
+  // reconnect, probe or relaunch on every key; keys pass through to the app
+  // until the breaker lets a probe request through.
+  if (m_client.Suspended())
+    return false;
   if (!m_client.Echo()) {
     _Reconnect();
     retry++;

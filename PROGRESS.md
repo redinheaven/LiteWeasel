@@ -112,6 +112,44 @@
 2. 服务端响应时去掉 `FlushFileBuffers` 后，"客户端发完请求被挂起"这条路径不再卡住服务端，仍没有做故障注入（需要挂起一个宿主进程）。
 3. `ipc.start_session` 在服务端卡住时只有约 252ms，是因为重连时连接预算（250ms）先耗尽，并没有走到它自己的 1000ms 超时；"服务端慢但能连上"的 `StartSession` 超时路径没有被真实环境覆盖（假服务端测试只测了 `ProcessKeyEvent`、`Echo`、`StartMaintenance`）。
 
+**第 3 步已实施：熔断（`9b29e23` 之后，分支 `perf/phase0-timing`）**
+
+改动：
+
+- `WeaselIPC/WeaselClientImpl.cpp`：进程内共享的 `CircuitBreaker`（原子状态，不加锁）。2 秒内连续 2 次"无响应"（读写超时，或连接时所有管道实例一直忙到连接预算用尽）则打开；打开期间所有**有限超时**的请求立即返回失败；3 秒后放行一个探针（超时 100ms），探针成功关闭，失败则打开时长翻倍（3→6→12→最长 30 秒）。**不限时的消息（`StartMaintenance`、`EndMaintenance`、`ShutdownServer`、`TrayCommand`）不受保护。** 服务端不存在、管道断开等"不是挂起"的错误不会触发熔断，且会让熔断复位，这样 TSF 原有的拉起 `start_service.bat` 逻辑不受影响。熔断状态变化写 ETW 事件 `ipc.breaker.open`/`probe_failed`/`close`（值为毫秒数乘 1000，沿用 `us` 字段）。新增 `Client::Suspended()`（`include/WeaselIPC.h`）。
+- `include/PipeChannel.h`、`WeaselIPC/PipeChannel.cpp`：`ChannelContext::connect_timed_out`，让 `Transact` 区分"连接预算用尽（`ERROR_TIMEOUT`）"和"管道不存在（`ERROR_PIPE_NOT_CONNECTED`）"；`_Ensure` 失败的检查移进了 `try`，失败时也会清掉暂存的请求体。
+- `WeaselTSF/WeaselTSF.cpp`：`_EnsureServerConnected()` 在熔断期间直接返回 false，不再重连、探测、拉起服务。
+- `WeaselTSF/KeyEventSink.cpp`：服务端不可用且熔断打开、并且还有未结束的组字时，调用 `_AbortComposition()` 本地结束它，避免残留候选窗。
+- `include/WeaselPerf.h`：新增 `EmitValue()`。
+- `tools/perf/ipc_timeout_test.cpp` 新增第 7、8 组（熔断）；新增 `tools/perf/fi_timeline.py`。
+
+验证：
+
+1. **假服务端故障注入全部通过**（8 组 31 项）。熔断部分：两次超时（264.4ms、264.6ms）后熔断打开，之后的 `Echo` 和 `ProcessKeyEvent` 0.0ms 立即被拒；3 秒后探针用约 100ms 超时（108.8ms）失败并重新打开，退避翻倍；服务端恢复后探针 0.4ms 成功，熔断关闭；`StartMaintenance` 在熔断打开时仍然通过并等满 407.7ms。
+2. **真实服务端挂起 4.02 秒**（`FI_step3.etl`，用户在记事本里连续打 `nihao`+空格，服务端挂起开始于抓取后 6.02 秒、恢复于 10.04 秒）：
+
+| 版本 | 被卡超过 20ms 的按键数 | 这些按键合计阻塞宿主线程 | 单个按键最长 |
+|---|---|---|---|
+| 第 1 步（无超时，基线） | 1 次连续卡住 | 约 4.4 秒（按键之间的空档，口径不同） | — |
+| 第 2 步（只有超时） | 5 | 2863 ms | 789 ms |
+| **第 3 步（超时 + 熔断）** | **2** | **755 ms** | **521 ms** |
+
+时间线（抓取开始后的秒数）：6.59 秒熔断打开（`ipc.breaker.open` 3000ms），在此之前只有一个按键被卡 521 ms（它自己的 `Echo` 先超时 257ms，`_Reconnect` 后再 `Echo` 又超时 264ms，一次按键里连续两次无响应就把熔断打开了）；之后到约 9.8 秒的开放期内没有任何按键被卡；约 9.8 秒的探针花了 234 ms，几乎都是连接阶段在等（服务端还在挂起，所有管道实例都忙，直到 10.04 秒恢复），随后 10.03 秒 `ipc.breaker.close`，之后的 135 次 `ipc.key` 正常（p50 0.80ms）。
+
+3. 编译：x64 33 条、x86 20 条警告，**全是原有警告**（`WeaselPanel.cpp`、`d2d.cpp` 的类型转换，因为改了 `WeaselIPC.h` 导致更多文件重编而显现；`PipeChannel.cpp` 5 条、`WeaselClientImpl.cpp` 4 条与改动前相同）；0 错误。
+
+**注意和局限**
+
+- **探针的连接阶段不受 100ms 探针超时限制**：连接预算是单独的 250ms，所以一次探针最坏约 350ms（本次实测 234ms）。它每个开放期只发生一次。如果要收紧，可以让探针也缩短连接预算，目前没有做。
+- 度量口径：基线是"按键之间的空档"，第 2、3 步是逐按键的阻塞时间，**基线与后两者不是同一口径**，表中只对第 2 步和第 3 步做同口径比较。
+- 只测了服务端被挂起 4 秒这一种故障。服务端被杀、管道中途断开、服务端在 `EndMaintenance` 里长时间持锁（读代码得出的、没有复现过的路径）都没有做真实注入。
+
+**还没验证的（第 3 步）**
+
+1. **挂起期间用户实际看到什么**：输入的字母是否原样出现在记事本里，恢复后是否有重复上屏、残留拼音或候选框、错字。**需要用户的观察，还没拿到。** `_AbortComposition()` 在熔断期间的行为只有代码推断。
+2. 服务端响应时去掉 `FlushFileBuffers` 后，"客户端发完请求被挂起"这条路径不再卡住服务端，仍没有做故障注入。
+3. 目标笔记本上的行为没测。
+
 ---
 
 ## 2026-11-19 · 第 0 阶段：按键延迟计时（ETW，T1/T3/T5/T7）

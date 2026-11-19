@@ -2,6 +2,7 @@
 #include "WeaselClientImpl.h"
 #include <StringAlgorithm.hpp>
 #include <WeaselPerf.h>
+#include <atomic>
 
 using namespace weasel;
 
@@ -229,15 +230,146 @@ static const char* PerfNameFor(WEASEL_IPC_COMMAND msg) {
   }
 }
 
+// Process-wide circuit breaker for the server connection.
+//
+// A hung server makes every request wait for its full timeout, and a host
+// types many keys per second, so without this each key would stall the host
+// thread again. After kTrip consecutive "unresponsive" failures (a timeout, or
+// all pipe instances staying busy) within kWindowMs the breaker opens: for
+// the open period every guarded request fails immediately and the keys go
+// straight to the application. After the period one request is let through as
+// a probe with a short timeout; success closes the breaker, failure doubles
+// the open period (up to kMaxOpenMs). A server that is simply not running is
+// NOT a hang; it does not trip the breaker, so the TSF's own relaunch logic
+// keeps working.
+namespace {
+constexpr DWORD kBaseOpenMs = 3000;
+constexpr DWORD kMaxOpenMs = 30000;
+constexpr ULONGLONG kWindowMs = 2000;
+constexpr int kTrip = 2;
+constexpr DWORD kProbeTimeoutMs = 100;
+
+class CircuitBreaker {
+ public:
+  enum class Verdict { Pass, Probe, Block };
+
+  Verdict Enter() {
+    const ULONGLONG until = open_until_.load();
+    if (until == 0)
+      return Verdict::Pass;
+    if (::GetTickCount64() < until)
+      return Verdict::Block;
+    // Open period over: exactly one caller becomes the probe.
+    return probe_in_flight_.exchange(true) ? Verdict::Block : Verdict::Probe;
+  }
+
+  // True while requests would be refused (open, or waiting for the probe).
+  bool Suspended() const {
+    const ULONGLONG until = open_until_.load();
+    return until != 0 &&
+           (::GetTickCount64() < until || probe_in_flight_.load());
+  }
+
+  void Success() {
+    if (open_until_.load() == 0 && failures_.load() == 0)
+      return;  // common case: nothing to reset
+    const bool was_open = open_until_.exchange(0) != 0;
+    failures_ = 0;
+    backoff_ms_ = kBaseOpenMs;
+    probe_in_flight_ = false;
+    if (was_open)
+      weasel::perf::EmitValue("ipc.breaker.close", 0);
+  }
+
+  // The server did not answer in time.
+  void Unresponsive(bool probe) {
+    const ULONGLONG now = ::GetTickCount64();
+    if (probe) {
+      DWORD next = backoff_ms_.load() * 2;
+      if (next > kMaxOpenMs)
+        next = kMaxOpenMs;
+      backoff_ms_ = next;
+      open_until_ = now + next;
+      probe_in_flight_ = false;
+      weasel::perf::EmitValue("ipc.breaker.probe_failed",
+                              static_cast<INT64>(next) * 1000);
+      return;
+    }
+    if (failures_.load() == 0 || now - first_failure_.load() > kWindowMs) {
+      failures_ = 1;
+      first_failure_ = now;
+    } else {
+      ++failures_;
+    }
+    if (failures_.load() >= kTrip) {
+      failures_ = 0;
+      open_until_ = now + backoff_ms_.load();
+      probe_in_flight_ = false;
+      weasel::perf::EmitValue("ipc.breaker.open",
+                              static_cast<INT64>(backoff_ms_.load()) * 1000);
+    }
+  }
+
+  // The request failed for another reason (no server, broken pipe, ...). That
+  // is not a hang: leave the decision to the caller's reconnect logic.
+  void Gone() {
+    failures_ = 0;
+    const bool was_open = open_until_.exchange(0) != 0;
+    backoff_ms_ = kBaseOpenMs;
+    probe_in_flight_ = false;
+    if (was_open)
+      weasel::perf::EmitValue("ipc.breaker.close", 0);
+  }
+
+ private:
+  std::atomic<ULONGLONG> open_until_{0};  // 0 = closed
+  std::atomic<bool> probe_in_flight_{false};
+  std::atomic<DWORD> backoff_ms_{kBaseOpenMs};
+  std::atomic<int> failures_{0};
+  std::atomic<ULONGLONG> first_failure_{0};
+};
+
+CircuitBreaker g_breaker;
+}  // namespace
+
+bool ClientImpl::Suspended() {
+  return g_breaker.Suspended();
+}
+
 LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
                                  DWORD wParam,
                                  DWORD lParam) {
   WEASEL_PERF_SCOPE(PerfNameFor(Msg));
+  DWORD timeout = TimeoutFor(Msg);
+  // Only requests with a bounded timeout (the input-method path) are guarded.
+  const bool guarded = timeout != INFINITE;
+  CircuitBreaker::Verdict verdict = CircuitBreaker::Verdict::Pass;
+  if (guarded) {
+    verdict = g_breaker.Enter();
+    if (verdict == CircuitBreaker::Verdict::Block)
+      return 0;
+    if (verdict == CircuitBreaker::Verdict::Probe && timeout > kProbeTimeoutMs)
+      timeout = kProbeTimeoutMs;
+  }
+  const bool probe = verdict == CircuitBreaker::Verdict::Probe;
   try {
     PipeMessage req{Msg, wParam, lParam};
-    return channel.Transact(req, TimeoutFor(Msg));
-  } catch (DWORD /* ex */) {
+    LRESULT result = channel.Transact(req, timeout);
+    if (guarded)
+      g_breaker.Success();
+    return result;
+  } catch (DWORD err) {
+    if (guarded) {
+      if (err == ERROR_TIMEOUT)
+        g_breaker.Unresponsive(probe);
+      else
+        g_breaker.Gone();
+    }
     return 0;
+  } catch (...) {
+    if (guarded)
+      g_breaker.Gone();  // never leave a probe flag set
+    throw;
   }
 }
 
@@ -322,4 +454,8 @@ bool Client::Echo() {
 
 bool Client::GetResponseData(ResponseHandler handler) {
   return m_pImpl->GetResponseData(handler);
+}
+
+bool Client::Suspended() const {
+  return ClientImpl::Suspended();
 }

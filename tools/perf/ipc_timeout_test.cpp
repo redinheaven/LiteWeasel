@@ -112,6 +112,34 @@ int main() {
   Sleep(1200);
   t = Now(); r = c.Echo(); Check(r, "Echo works again afterwards", Ms(t, Now()));
 
+  printf("7. circuit breaker: two timeouts open it, requests are refused at once, a probe closes it\n");
+  g_echo_delay = 5000;
+  t = Now(); r = c.Echo(); ms = Ms(t, Now()); Check(!r && ms >= 200 && ms < 450, "1st Echo times out (~250 ms)", ms);
+  Check(!c.Suspended(), "breaker still closed after one failure", 0);
+  t = Now(); r = c.Echo(); ms = Ms(t, Now()); Check(!r && ms >= 200 && ms < 450, "2nd Echo times out (~250 ms)", ms);
+  Check(c.Suspended(), "breaker is open after two consecutive timeouts", 0);
+  t = Now(); r = c.Echo(); ms = Ms(t, Now()); Check(!r && ms < 20, "Echo is refused immediately while open", ms);
+  t = Now(); r = c.ProcessKeyEvent(weasel::KeyEvent('x', 0)); ms = Ms(t, Now()); Check(!r && ms < 20, "ProcessKeyEvent is refused immediately while open", ms);
+  Sleep(3300);
+  Check(!c.Suspended(), "open period (3 s) is over: next call is the probe", 0);
+  t = Now(); r = c.Echo(); ms = Ms(t, Now()); Check(!r && ms >= 70 && ms < 220, "probe uses the short ~100 ms timeout", ms);
+  Check(c.Suspended(), "failed probe re-opens the breaker", 0);
+  Sleep(200);
+  t = Now(); r = c.Echo(); ms = Ms(t, Now()); Check(!r && ms < 20, "still refused during the doubled (6 s) open period", ms);
+  g_echo_delay = 0;
+  Sleep(6200);
+  t = Now(); r = c.Echo(); ms = Ms(t, Now()); Check(r && ms < 100, "probe succeeds once the server answers: breaker closes", ms);
+  Check(!c.Suspended(), "breaker is closed again", 0);
+  t = Now(); r = c.ProcessKeyEvent(weasel::KeyEvent('y', 0)); ms = Ms(t, Now()); Check(r && ms < 100, "normal operation resumed", ms);
+
+  printf("8. messages without a timeout are not guarded by the breaker\n");
+  g_echo_delay = 5000;
+  c.Echo(); c.Echo();
+  Check(c.Suspended(), "breaker open again", 0);
+  g_maint_delay = 400;
+  t = Now(); c.StartMaintenance(); ms = Ms(t, Now());
+  Check(ms >= 350 && ms < 1500, "StartMaintenance still goes through and waits 400 ms", ms);
+  g_maint_delay = 0; g_echo_delay = 0;
   printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail, g_fail == 1 ? "" : "s");
   g_stop = true;
   return g_fail ? 1 : 0;

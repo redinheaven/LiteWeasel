@@ -46,6 +46,14 @@ inline void Emit(const char* stage, LONGLONG t0) {
                     TraceLoggingInt64(us, "us"));
 }
 
+// Writes a "Stage" event carrying a value instead of a measured duration (for
+// state changes such as the IPC circuit breaker; the value is in microseconds
+// to keep the unit of the "us" field).
+inline void EmitValue(const char* stage, INT64 us) {
+  TraceLoggingWrite(g_hWeaselPerf, "Stage", TraceLoggingString(stage, "stage"),
+                    TraceLoggingInt64(us, "us"));
+}
+
 // Sequential laps inside one function: take a mark, then call Lap() after each
 // step. Lap() emits (now - mark) under the given name and restarts the mark.
 // When tracing is disabled the mark is 0 and Lap() does nothing.

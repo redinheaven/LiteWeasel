@@ -146,6 +146,9 @@ class Client {
   void TrayCommand(UINT menuId);
   // 读取server返回的数据
   bool GetResponseData(ResponseHandler handler);
+  // 服务端无响应（熔断器打开）时为 true：请求会立即失败，按键应直接放行。
+  // 对整个进程生效。
+  bool Suspended() const;
 
  private:
   ClientImpl* m_pImpl;

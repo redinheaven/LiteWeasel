@@ -26,6 +26,11 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
   }
   if (!server_ok) {
     *pfEaten = FALSE;
+    // The server is not answering: drop the composition that is still on
+    // screen (its state lives in the server), instead of leaving a stale
+    // candidate window while the keys go to the application.
+    if (m_client.Suspended() && _IsComposing())
+      _AbortComposition();
     return;
   }
   weasel::KeyEvent ke;
