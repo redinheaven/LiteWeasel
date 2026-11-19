@@ -54,6 +54,36 @@
 
 **顺带记录（不属于本阶段）**：每个按键先 `Echo` 一次（见事实 6）是第 5 阶段第 3 项的实证，可以改成"距离上次成功事务超过约 1 秒才 `Echo`"，能把管道往返减半，但会改变 TSF 的会话校验时机，要单独出方案。
 
+**第 1 步已实施（用户已确认方案，三步实施中的第一步）**
+
+改动（分支 `perf/phase0-timing`）：
+
+- `WeaselIPC/PipeChannel.cpp`：`_Connect` 总时长封顶 250ms（`GetTickCount64` 计时，`WaitNamedPipe` 只等剩余时间），超过返回 `INVALID_HANDLE_VALUE`；`_WritePipe` 去掉 `FlushFileBuffers`（客户端和服务端共用这个函数，所以两端同时去掉）。
+- `include/PipeChannel.h`：`ChannelContext` 新增 `response_valid`，`Transact` 开始时置 false、完整收到响应后置 true；`HandleResponseData` 在无效时返回 false；`Transact` 里 `_Ensure()` 失败直接抛 `ERROR_PIPE_NOT_CONNECTED`，不再对无效句柄写入并再重连一次。
+- 新增 `tools/perf/ipc_busy_test.cpp`：用同名管道占满唯一实例，让客户端得到 `ERROR_PIPE_BUSY`，量 `Connect`/`StartSession` 的耗时。
+
+验证：
+
+1. **连接限时**：管道被占满时 `Client::Connect` 254.6–261.5ms 返回失败；走 `Transact` 的 `StartSession` 251.0ms 返回（只等一次预算，不是两次）。没有跑"改之前"的对照，原来的 `while(...) WaitNamedPipe(name, 500)` 是无上限循环，是读代码的结论。
+2. **正常打字无退化**（`P4S1_multi.etl` 对比 `M4_multi.etl`，同一个记事本内连续打词，M4 是 8 个词，这次 5 个词）：
+
+| 阶段 | M4 p50 / p95 (µs) | 第 1 步 p50 / p95 (µs) |
+|---|---|---|
+| `tsf.ipc_key_roundtrip` | 780 / 5229 | 761 / 5215 |
+| `srv.on_key_event` | 650 / 4988 | 655 / 5108 |
+| `tsf.get_response` | 422 / 528 | 416 / 472 |
+| `tsf.do_edit_session` | 1537 / 10131 | 1420 / 9902 |
+| `ui.do_paint` | 1736 / 2162 | 1738 / 2423 |
+
+去掉 `FlushFileBuffers` 后往返耗时没有可测的变化（780 → 761µs，在噪声内）。`tsf.get_response`、`ui.update`、`ui.do_paint` 都有正常的事件数，说明新增的 `response_valid` 没有影响正常的组字流程。
+
+3. 编译：x64、x86 均 0 错误；警告都是 `PipeChannel.cpp`、`WeaselClientImpl.cpp`、`WeaselServerImpl.cpp` 里原有的 `size_t`/`LRESULT` 转换，行号因代码增加后移，没有新增。
+
+**还没验证的（第 1 步）**
+
+1. 服务端 `_Send` 去掉 Flush 后，"客户端发完请求被挂起"这条路径是否真的不再卡住服务端，没有做故障注入。
+2. `response_valid` 在"服务端无响应"时是否真的让 `DoEditSession` 跳过组字更新，要等第 2 步有了超时才能触发，现在只验证了成功路径没有被影响。
+
 ---
 
 ## 2026-11-19 · 第 0 阶段：按键延迟计时（ETW，T1/T3/T5/T7）

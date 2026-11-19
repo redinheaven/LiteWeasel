@@ -39,9 +39,17 @@ bool PipeChannelBase::_Ensure() {
 }
 
 HANDLE PipeChannelBase::_Connect(const wchar_t* name) {
+  // All pipe instances can be busy for a while (e.g. a stuck server). Wait for
+  // a free instance, but never forever: a host UI thread may be calling this.
+  constexpr ULONGLONG kConnectBudgetMs = 250;
+  const ULONGLONG deadline = ::GetTickCount64() + kConnectBudgetMs;
   HANDLE pipe = INVALID_HANDLE_VALUE;
-  while (_Invalid(pipe = _TryConnect()))
-    ::WaitNamedPipe(name, 500);
+  while (_Invalid(pipe = _TryConnect())) {
+    const ULONGLONG now = ::GetTickCount64();
+    if (now >= deadline)
+      return INVALID_HANDLE_VALUE;
+    ::WaitNamedPipe(name, static_cast<DWORD>(deadline - now));
+  }
   DWORD mode = PIPE_READMODE_MESSAGE;
   if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL)) {
     _ThrowLastError;
@@ -73,7 +81,10 @@ size_t PipeChannelBase::_WritePipe(HANDLE pipe, size_t s, char* b) {
   if (!::WriteFile(pipe, b, s, &lwritten, NULL) || lwritten <= 0) {
     _ThrowLastError;
   }
-  ::FlushFileBuffers(pipe);
+  // No FlushFileBuffers() here: it blocks until the peer has read the data and
+  // cannot be given a timeout. The server called it while holding its global
+  // request lock, so one stalled client could stall every client. Message-mode
+  // pipes keep the data buffered and ordered, and the reader gets it anyway.
   return lwritten;
 }
 

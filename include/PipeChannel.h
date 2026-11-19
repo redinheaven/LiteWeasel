@@ -16,9 +16,15 @@ class PipeChannelBase {
     std::unique_ptr<char[]> buffer;
     std::unique_ptr<Stream> write_stream;
     bool has_body;
+    // False from the start of a transaction until its response has been fully
+    // received, so a failed or timed-out transaction cannot make the caller
+    // parse the previous response again.
+    bool response_valid;
 
     ChannelContext(size_t bs)
-        : buffer(std::make_unique<char[]>(bs)), has_body(false) {}
+        : buffer(std::make_unique<char[]>(bs)),
+          has_body(false),
+          response_valid(true) {}
   };
 
   PipeChannelBase(std::wstring&& pn_cmd, size_t bs, SECURITY_ATTRIBUTES* s);
@@ -118,10 +124,16 @@ class PipeChannel : public PipeChannelBase {
   }
 
   _TyRes Transact(Msg& msg) {
-    _Ensure();
+    _GetContext()->response_valid = false;
+    // Fail fast when there is no connection (e.g. the connect budget ran out)
+    // instead of trying to write to an invalid handle and reconnecting again.
+    if (!_Ensure())
+      throw static_cast<DWORD>(ERROR_PIPE_NOT_CONNECTED);
     HANDLE* phandle = _GetPipeHandle();
     _Send(*phandle, msg);
-    return _ReceiveResponse();
+    _TyRes result = _ReceiveResponse();
+    _GetContext()->response_valid = true;
+    return result;
   }
 
   void ClearBufferStream() {
@@ -139,6 +151,11 @@ class PipeChannel : public PipeChannelBase {
   template <typename _TyHandler>
   bool HandleResponseData(_TyHandler const& handler) {
     if (!handler) {
+      return false;
+    }
+    // The last transaction failed or timed out: the buffer holds a stale
+    // response, do not hand it to the caller again.
+    if (!_GetContext()->response_valid) {
       return false;
     }
 
