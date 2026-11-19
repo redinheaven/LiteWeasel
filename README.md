@@ -1,6 +1,6 @@
-# Lite_weasel —— 给老电脑用的丝滑小狼毫
+# LiteWeasel（Lite_weasel）—— 给老电脑用的丝滑小狼毫
 
-**Lite_weasel** 是 [小狼毫（Weasel）](https://github.com/rime/weasel) 的一个改良版。小狼毫是 Windows 上的 Rime 输入法。
+**LiteWeasel** 是 [小狼毫（Weasel）](https://github.com/rime/weasel) 的一个改良版（保留原 `%APPDATA%\Rime` 词库）。小狼毫是 Windows 上的 Rime 输入法。
 
 这个版本只想解决一个问题：**让小狼毫在老旧、低配的笔记本上打字也顺滑。**
 

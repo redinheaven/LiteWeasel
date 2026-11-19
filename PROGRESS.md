@@ -10,7 +10,7 @@
 
 **重要前提：本文件里的所有数据都来自台式机**（24 个逻辑核心、NVMe 硬盘），**没有在目标笔记本上测过任何东西**，不能直接推到老机器上。
 
-**分支与提交**：`perf/phase0-timing`，从 master `f96ed24` 切出，**没有推送**。代码类提交：`199bfae`（ETW 计时 T1/T3/T5/T7）、`23589cc`（T6/T8，拆开首键）、`92b79df`（获得焦点时预热图形设备）、`7a5b370`（D2D 工厂不带调试层）、`e458984`（服务端按键计时）、`d7281d8`/`9b29e23`/`383d937`（第 4 阶段防卡死的三步）。另有若干 `docs:` 提交记录数据和方案。
+**分支与提交**：`perf/phase0-timing`，从 master `f96ed24` 切出，**没有推送**。代码类提交：`199bfae`（ETW 计时 T1/T3/T5/T7）、`23589cc`（T6/T8，拆开首键）、`92b79df`（获得焦点时预热图形设备）、`7a5b370`（D2D 工厂不带调试层）、`e458984`（服务端按键计时）、`d7281d8`/`9b29e23`/`383d937`（第 4 阶段防卡死的三步）、`a97ef4d`（`D2D::GetTextSize` 复用与缓存）、`6623acf`（第 3 阶段进程与维护优先级）、`73924cc`（探针 100ms 收紧与跳过每键 `Echo`）、`0adc476`（更名 `LiteWeasel` 与重绘图标）。另有若干 `docs:` 提交记录数据和方案。
 
 **已取得的效果（台式机）**
 
@@ -18,11 +18,11 @@
 |---|---|---|---|
 | 新程序里第一个字慢 | 获得焦点时预热图形设备（`92b79df`） | 首个按键的 `do_edit_session` 中位数 36.5ms → 19.4ms（5 个新进程） | 每个进程第一次获得焦点多阻塞约 17ms，多占约 3.9MB 工作集（1.3MB 私有字节）；笔记本上没测 |
 | 候选框重绘慢 | D2D 工厂改用 `D2D1_DEBUG_LEVEL_NONE`（`7a5b370`） | `ui.do_paint` 中位数 3.38ms → 1.74ms | 目标笔记本上有没有 `D2D1Debug3.dll` 没验证，没有的话收益可能为零 |
-| 候选框排版重复测文字 | `D2D::GetTextSize` 复用单个 `IDWriteTextLayout`（`SetMaxWidth`/`SetMaxHeight`）并加 256 项尺寸缓存（未提交） | `HorizontalLayout::DoLayout()`（真实 `WeaselUI.lib`）：全新 7 候选词 p50 1.944ms → 0.676ms（-65%）；重复前缀打字 1.713ms → 0.007ms；几何校验和完全一致 | 每 `WeaselPanel` 最多约 15KB 缓存，样式/DPI 变化自动清空；笔记本未测 |
-| 后台卡住拖垮宿主 | 管道调用加超时、熔断，并修了几个缺陷（第 4 阶段 + 探针收紧，探针收紧未提交） | 服务端挂起 4 秒：被卡的按键 5 个/2863ms（只有超时）→ 2 个/755ms（加熔断）；组字中途挂起 8 秒：2 个/约 1.06 秒；探针收紧后管道全忙时探针耗时 250+250ms → 109.5ms | 熔断期间按键直接变成英文字母（这是设计） |
+| 候选框排版重复测文字 | `D2D::GetTextSize` 复用单个 `IDWriteTextLayout`（`SetMaxWidth`/`SetMaxHeight`）并加 256 项尺寸缓存（`a97ef4d`） | `HorizontalLayout::DoLayout()`（真实 `WeaselUI.lib`）：全新 7 候选词 p50 1.944ms → 0.676ms（-65%）；重复前缀打字 1.713ms → 0.007ms；几何校验和完全一致 | 每 `WeaselPanel` 最多约 15KB 缓存，样式/DPI 变化自动清空；笔记本未测 |
+| 后台卡住拖垮宿主 | 管道调用加超时、熔断，并修了几个缺陷（第 4 阶段 + 探针收紧 `73924cc`） | 服务端挂起 4 秒：被卡的按键 5 个/2863ms（只有超时）→ 2 个/755ms（加熔断）；组字中途挂起 8 秒：2 个/约 1.06 秒；探针收紧后管道全忙时探针耗时 250+250ms → 109.5ms | 熔断期间按键直接变成英文字母（这是设计） |
 | 一个不读响应的客户端拖住所有宿主 | 去掉两端的 `FlushFileBuffers` | 另一个客户端的 `Echo`：5500ms → 0.4ms（4 轮） | 只用自己写的原始管道客户端测过，不是真实被挂起的宿主进程 |
-| 每键多余的 `Echo` 往返 | 1 秒内管道通信正常则跳过 `Echo`（第 5 阶段第 3 项，未提交） | 假服务端 100 键总 IPC 耗时：10.40ms → 5.76ms（-44.6%，0 次 `Echo`）；中途服务端重启自动检测重连并重试，0 丢键 | 若服务端仅做维护而不重启且在 1 秒内完成，最多 1 秒后重新校验；笔记本未测 |
-| 服务端与部署优先级 | `WeaselDeployer` 设 `BELOW_NORMAL`；`WeaselServer` 正常服务设 `ABOVE_NORMAL`，`start_maintenance` 期间临时降为 `BELOW_NORMAL`（第 3 阶段，未提交） | 自动化实测：`WeaselServer` 首次维护 10.8s 全程 `BelowNormal` → 就绪后升 `AboveNormal`；`WeaselDeployer /deploy` 10.3s 全程 `BelowNormal` | 目标笔记本低配 CPU 上的部署期打字延迟未实测 |
+| 每键多余的 `Echo` 往返 | 1 秒内管道通信正常则跳过 `Echo`（第 5 阶段第 3 项，`73924cc`） | 假服务端 100 键总 IPC 耗时：10.40ms → 5.76ms（-44.6%，0 次 `Echo`）；中途服务端重启自动检测重连并重试，0 丢键 | 若服务端仅做维护而不重启且在 1 秒内完成，最多 1 秒后重新校验；笔记本未测 |
+| 服务端与部署优先级 | `WeaselDeployer` 设 `BELOW_NORMAL`；`WeaselServer` 正常服务设 `ABOVE_NORMAL`，`start_maintenance` 期间临时降为 `BELOW_NORMAL`（第 3 阶段，`6623acf`） | 自动化实测：`WeaselServer` 首次维护 10.8s 全程 `BelowNormal` → 就绪后升 `AboveNormal`；`WeaselDeployer /deploy` 10.3s 全程 `BelowNormal` | 目标笔记本低配 CPU 上的部署期打字延迟未实测 |
 
 **已查清的发现（2026-11-19 自动化隔离测速，台式机）**
 
@@ -41,18 +41,18 @@
 
 **本机（台式机）现状**
 
-- 官方小狼毫 0.17.4 **已卸载**，装的是测试版，代码对应 `383d937`。要退回：卸载测试版、重装官方 0.17.4，词库不用动。
+- 官方小狼毫 0.17.4 **已卸载**，现安装的是最新 **`LiteWeasel` 测试版**（代码对应 `0adc476`，安装目录 `C:\Program Files\Rime\LiteWeasel-0.17.4\`，安装包 `output\archives\LiteWeasel-0.17.4.0.liteweasel-installer.exe`）。要退回：卸载后重装官方 0.17.4，词库不用动。
+- 本机输入法与默认设置：已清理重复的大陆简体（`0x00000804`）与微软拼音，仅保留 `en-US`（`00000409`）与 `zh-Hans-SG`（`00001004` 下的 `LiteWeasel`），并将 `LiteWeasel` 设为 Windows 默认输入法（`InputMethodOverride`）。
 - 词库备份：`C:\Users\Administrator\RimeBackup_20261119\`（`Rime\` 目录 116 个文件，逐文件哈希一致；`HKCU_Rime.reg`、`HKLM_WOW6432Node_Rime.reg`）。真实用户目录 `%APPDATA%\Rime\build\` 已被新版 `rime.dll` 重新部署过，用户自己的配置和用户词库没有变。`HKCU\Software\Rime\Weasel\RimeUserDir` 已恢复为原值。
 - 构建环境：VS 2022 Build Tools 17.14（含 ATL、MFC、ARM64）、NSIS、7-Zip、aria2、Boost 1.84（`deps/`，x86 和 x64）、预编译 librime `33e7814`、`plum` 子模块已初始化、`env.bat`（已被 `.gitignore`）。**本机有 CPU 过热保护断电的问题，构建必须限制并行度**，见 `AGENTS.md`。
 - 临时产物已清理：旧行为的服务端副本、测试目录、ETW 会话。
 
-**工具（`tools/perf/`）**：`summarize.py`（各阶段 p50/p95/max）、`by_pid.py`（首键与后续键按进程拆开）、`fi_suspend_server.ps1`（挂起服务端并抓 ETW）、`fi_block.py`、`fi_timeline.py`（故障注入时的阻塞时间和熔断时间线）、`ipc_timeout_test.cpp`（假服务端故障注入，8 组）、`ipc_busy_test.cpp`（管道被占满）、`ipc_stall_ab.py`（不读响应的客户端 A/B）、`memtest.cpp`（预热的内存代价）、`d2ddbg.cpp`（D2D 调试层 A/B）。ETW provider：`LiteWeasel-Perf`，GUID `{5974258d-005e-4490-adef-9e265b26abf5}`，抓取命令见下面"第 0 阶段：按键延迟计时"一条。
+**工具（`tools/`）**：`perf/summarize.py`（各阶段 p50/p95/max）、`perf/by_pid.py`（首键与后续键按进程拆开）、`perf/fi_suspend_server.ps1`（挂起服务端并抓 ETW）、`perf/fi_block.py`、`perf/fi_timeline.py`（故障注入时的阻塞时间和熔断时间线）、`perf/ipc_timeout_test.cpp`（假服务端故障注入，9 组 32 项）、`perf/ipc_busy_test.cpp`（管道被占满+探针预算）、`perf/ipc_stall_ab.py`（不读响应的客户端 A/B）、`perf/memtest.cpp`（预热的内存代价）、`perf/d2ddbg.cpp`（D2D 调试层 A/B）、`perf/rime_firstkey_bench.cpp`（librime 用户数据隔离基准）、`perf/ui_bench.cpp`（WARP 阴影与布局微基准）、`perf/layout_bench.cpp`（真实 `WeaselUI.lib` 排版前后对照）、`gen_icons.py`（生成 `LiteWeasel` 极简图标）。ETW provider：`LiteWeasel-Perf`，GUID `{5974258d-005e-4490-adef-9e265b26abf5}`，抓取命令见下面"第 0 阶段：按键延迟计时"一条。
 
 **建议的下一步**
 
-1. **在目标笔记本上测一轮**（最大的缺口）：装测试版安装包，用 ETW 抓新程序第一个字、连续快速输入、部署期间输入、睡眠唤醒后第一个字。装之前必须先备份 `%APPDATA%\Rime`，且先让服务端正常退出（`WeaselServer.exe /q`），否则备份里的 leveldb 不完整。
-2. 看数据再决定做什么：首键里的服务端耗时（要先隔离是哪份用户数据）、`start_composition` 里的约 6.5ms、每个按键先 `Echo` 一次、第 3 阶段。如果笔记本上已经"感觉不到"，就收手。
-3. 熔断探针的小优化（`Echo` 失败后若熔断已打开就直接返回）改动很小，没有做。
+1. **在目标笔记本上测一轮**（最大的缺口）：把 `output\archives\LiteWeasel-0.17.4.0.liteweasel-installer.exe` 拷过去安装（装前先 `WeaselServer.exe /q` 并备份 `%APPDATA%\Rime`），用 ETW 抓新程序第一个字、连续快速输入、部署期间输入、睡眠唤醒后第一个字；同时建议按笔记本情况评估是否关闭 `enable_correction`。
+2. 看笔记本实测数据再决定是否继续第 5 阶段剩余项（交换链只放大不缩小、字体回退、唤醒预热）；如果已经够丝滑，就收手并合并推送。
 
 **文档分工**：`AGENTS.md` 是规范、结构、已知踩坑；`README.md` 是写给普通用户的大白话；本文件是详细记录；`initial task.txt` 是顶层设计和各阶段的执行状态。
 

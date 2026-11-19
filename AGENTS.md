@@ -30,7 +30,9 @@
 - `WeaselUI/d2d.cpp` 优先使用 `D3D_DRIVER_TYPE_WARP` 创建 D3D11 设备，失败时才退回硬件，交换链用的是 `CreateSwapChainForComposition`。仓库里没有 `DirectWriteResources.cpp`，也没有 `CreateDCRenderTarget`。D2D 工厂现在用 `D2D1_DEBUG_LEVEL_NONE`（原来是 `INFORMATION`，会加载调试层，实测每次绘制慢约一倍）。
 - **`CCandidateList::StartUI`（含 `Refresh()` 后接 `Hide()` 的预热）是从 `WeaselTSF::_StartComposition`（`Composition.cpp`）调用的，也就是第一次组字时才执行，不是"获得焦点就预热"。** 预热本身**必须保留**，也不能把 D2D 资源的创建推迟到第一次绘制。与窗口无关、占大头的图形设备初始化（`DeviceResources::EnsureInitialized()`，约 17ms）现在在线程获得焦点时提前做，用 `std::mutex` 保护。每次组字结束时 `EndUI` 会销毁候选窗，下一次组字重建（约 2.7ms），`DeviceResources` 单例保留。
 - 词库部署和维护跑在 **WeaselServer 进程内的线程**里，不是只在 WeaselDeployer.exe 里。服务端所有请求都在全局互斥锁 `g_api_mutex` 下串行处理；`EndMaintenance()` 经 `Initialize()` 里的 `join_maintenance_thread()` 可能长时间持锁（读代码得出，没有复现过）。
-- `WeaselIPC/PipeChannel.*` 已在第 4 阶段改过：连接总时长封顶 250ms；客户端句柄是重叠 I/O，读写带超时，超时就关闭这根管道；两端都不再调用 `FlushFileBuffers`（它无法限时，服务端还是在持有全局锁时调用）；`ClientImpl::_SendMessage` 有进程内熔断器（`Client::Suspended()`）。线路格式没有变。仍然成立的事实：服务端管道句柄是同步的；TSF 每个按键先 `Echo` 一次再 `ProcessKeyEvent`，所以每个按键至少两次管道往返（还没改）。
+- `WeaselIPC/PipeChannel.*` 与 `WeaselClientImpl.cpp` 已完成第 4 阶段与第 5 阶段第 3 项：连接总时长封顶 250ms（且不超过请求自身超时，探针约 100ms）；客户端句柄是重叠 I/O，读写带超时，超时就关闭这根管道；两端都不再调用 `FlushFileBuffers`；`ClientImpl::_SendMessage` 有进程内熔断器（`Client::Suspended()`）；1 秒内管道通信正常时跳过每键 `Echo`（`IsRecentlyAlive(1000)`，断管重连时由 `LastRequestFailed()` 触发重试不丢键）。线路格式没有变。服务端管道句柄仍是同步的。
+- 品牌与安装（`0adc476`）：输入法显示名（`get_weasel_ime_name()`）、`.rc` 资源、图标（`resource/*.ico`）和 `install.nsi` 安装目录/快捷方式已更名为 `LiteWeasel`，但保留 `%APPDATA%\Rime` 用户目录、原注册表设置项（`HKCU\Software\Rime\Weasel`）及通信管道名，确保词库无缝保留。
+- 进程优先级（`6623acf`）：`WeaselDeployer.exe` 为 `BELOW_NORMAL`；`WeaselServer.exe` 初始化后设为 `ABOVE_NORMAL`（`start_maintenance` 期间临时降为 `BELOW_NORMAL`）。
 
 ## 3. 构建
 
