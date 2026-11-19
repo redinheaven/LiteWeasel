@@ -10,6 +10,7 @@ static BOOL prevfEaten = FALSE;
 static int keyCountToSimulate = 0;
 
 void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
+  WEASEL_PERF_SCOPE("tsf.process_key");
   // when _IsKeyboardDisabled don't eat the key,
   // when keyboard closable and keyboard closed, don't eat the key
   if ((_isToOpenClose && !_IsKeyboardOpen()) || _IsKeyboardDisabled()) {
@@ -18,7 +19,12 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
   }
 
   // if server connection is Not OK, don't eat it.
-  if (!_EnsureServerConnected()) {
+  bool server_ok;
+  {
+    WEASEL_PERF_SCOPE("tsf.ensure_server");
+    server_ok = _EnsureServerConnected();
+  }
+  if (!server_ok) {
     *pfEaten = FALSE;
     return;
   }

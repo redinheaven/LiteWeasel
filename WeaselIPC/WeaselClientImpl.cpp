@@ -1,6 +1,7 @@
 ﻿#include "stdafx.h"
 #include "WeaselClientImpl.h"
 #include <StringAlgorithm.hpp>
+#include <WeaselPerf.h>
 
 using namespace weasel;
 
@@ -167,7 +168,10 @@ void ClientImpl::EndMaintenance() {
 }
 
 bool ClientImpl::Echo() {
-  if (!_Active())
+  // Only a session id is required here, not an open pipe: after a timeout the
+  // pipe is closed, and Echo is the probe that reconnects it (Transact does
+  // that) and checks that the server still knows this session.
+  if (session_id == 0)
     return false;
 
   UINT serverEcho = _SendMessage(WEASEL_IPC_ECHO, 0, session_id);
@@ -190,12 +194,48 @@ bool ClientImpl::_WriteClientInfo() {
   return true;
 }
 
+// How long a request may take before the client gives up on the server. This
+// runs on host-application threads (often the UI thread), so it must be
+// bounded. The values are well above what the server needs normally (a key
+// event takes about 1 ms, p95 about 5 ms, 97 ms at worst in our traces).
+static DWORD TimeoutFor(WEASEL_IPC_COMMAND msg) {
+  switch (msg) {
+    // These can legitimately take a long time (the server redeploys / shuts
+    // down while handling them), and their callers (WeaselDeployer, the
+    // tray) are not input-method hosts.
+    case WEASEL_IPC_START_MAINTENANCE:
+    case WEASEL_IPC_END_MAINTENANCE:
+    case WEASEL_IPC_SHUTDOWN_SERVER:
+    case WEASEL_IPC_TRAY_COMMAND:
+      return INFINITE;
+    // Creating a session can involve loading a schema.
+    case WEASEL_IPC_START_SESSION:
+      return 1000;
+    default:
+      return 250;
+  }
+}
+
+static const char* PerfNameFor(WEASEL_IPC_COMMAND msg) {
+  switch (msg) {
+    case WEASEL_IPC_ECHO:
+      return "ipc.echo";
+    case WEASEL_IPC_PROCESS_KEY_EVENT:
+      return "ipc.key";
+    case WEASEL_IPC_START_SESSION:
+      return "ipc.start_session";
+    default:
+      return "ipc.other";
+  }
+}
+
 LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
                                  DWORD wParam,
                                  DWORD lParam) {
+  WEASEL_PERF_SCOPE(PerfNameFor(Msg));
   try {
     PipeMessage req{Msg, wParam, lParam};
-    return channel.Transact(req);
+    return channel.Transact(req, TimeoutFor(Msg));
   } catch (DWORD /* ex */) {
     return 0;
   }

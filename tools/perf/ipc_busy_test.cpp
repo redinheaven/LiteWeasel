@@ -4,6 +4,10 @@
 #include <string>
 #include <cstdio>
 #include <WeaselIPC.h>
+#include <WeaselPerf.h>
+// WeaselIPC.lib reports timings through this provider; the real one lives in WeaselUI.lib.
+TRACELOGGING_DEFINE_PROVIDER(g_hWeaselPerf, "LiteWeasel-Perf", (0x5974258d, 0x005e, 0x4490, 0xad, 0xef, 0x9e, 0x26, 0x5b, 0x26, 0xab, 0xf5));
+
 
 static double Ms(LONGLONG a, LONGLONG b) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return (b - a) * 1000.0 / f.QuadPart; }
 static LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }

@@ -20,12 +20,26 @@ class PipeChannelBase {
     // received, so a failed or timed-out transaction cannot make the caller
     // parse the previous response again.
     bool response_valid;
+    // Manual-reset event used for this thread's overlapped client I/O.
+    HANDLE io_event;
 
     ChannelContext(size_t bs)
         : buffer(std::make_unique<char[]>(bs)),
           has_body(false),
-          response_valid(true) {}
+          response_valid(true),
+          io_event(::CreateEventW(NULL, TRUE, FALSE, NULL)) {}
+    ~ChannelContext() {
+      if (io_event)
+        ::CloseHandle(io_event);
+    }
+    ChannelContext(const ChannelContext&) = delete;
+    ChannelContext& operator=(const ChannelContext&) = delete;
   };
+
+  // Timeout value meaning "plain synchronous I/O" (used by the server side,
+  // whose pipe handles are not overlapped). Client I/O always uses a timeout
+  // (INFINITE included), because client handles are opened overlapped.
+  static constexpr DWORD kSyncIo = 0;
 
   PipeChannelBase(std::wstring&& pn_cmd, size_t bs, SECURITY_ATTRIBUTES* s);
   ~PipeChannelBase();
@@ -40,6 +54,15 @@ class PipeChannelBase {
   /* Try to connect for one time */
   HANDLE _TryConnect();
   size_t _WritePipe(HANDLE p, size_t s, char* b);
+  /* Overlapped write / read with a timeout (client side). On timeout the I/O
+   * is cancelled, and ERROR_TIMEOUT is thrown. */
+  size_t _WritePipeTimed(HANDLE p, size_t s, char* b, DWORD timeoutMs);
+  void _ReceiveTimed(HANDLE pipe, LPVOID msg, size_t rec_len, DWORD timeoutMs);
+  /* Wait for a pending overlapped operation; returns an error code. */
+  DWORD _WaitOverlapped(HANDLE pipe,
+                        OVERLAPPED& ov,
+                        DWORD timeoutMs,
+                        DWORD* transferred);
   void _FinalizePipe(HANDLE& p);
   void _Receive(HANDLE pipe, LPVOID msg, size_t rec_len);
   /* Try to get a connection from client */
@@ -123,17 +146,41 @@ class PipeChannel : public PipeChannelBase {
     return *this;
   }
 
-  _TyRes Transact(Msg& msg) {
+  /* Send a request and wait for the response (client side). timeoutMs is the
+   * total budget for writing the request and reading the response; INFINITE
+   * waits forever. On timeout the pipe is closed (a late response is then
+   * discarded by the system and cannot be mistaken for the next one) and
+   * ERROR_TIMEOUT is thrown. Any failure leaves the response buffer invalid. */
+  _TyRes Transact(Msg& msg, DWORD timeoutMs = INFINITE) {
+    if (timeoutMs == kSyncIo)
+      timeoutMs = INFINITE;
     _GetContext()->response_valid = false;
     // Fail fast when there is no connection (e.g. the connect budget ran out)
     // instead of trying to write to an invalid handle and reconnecting again.
     if (!_Ensure())
       throw static_cast<DWORD>(ERROR_PIPE_NOT_CONNECTED);
     HANDLE* phandle = _GetPipeHandle();
-    _Send(*phandle, msg);
-    _TyRes result = _ReceiveResponse();
-    _GetContext()->response_valid = true;
-    return result;
+    const ULONGLONG start = ::GetTickCount64();
+    try {
+      _Send(*phandle, msg, timeoutMs);
+      DWORD remaining = timeoutMs;
+      if (timeoutMs != INFINITE) {
+        const ULONGLONG elapsed = ::GetTickCount64() - start;
+        remaining = elapsed >= timeoutMs
+                        ? 1
+                        : static_cast<DWORD>(timeoutMs - elapsed);
+      }
+      _TyRes result = _ReceiveResponse(remaining);
+      _GetContext()->response_valid = true;
+      return result;
+    } catch (DWORD err) {
+      // A request body that was staged but not delivered must not be sent
+      // along with the next request.
+      ClearBufferStream();
+      if (err == ERROR_TIMEOUT)
+        _FinalizePipe(*phandle);
+      throw;
+    }
   }
 
   void ClearBufferStream() {
@@ -165,7 +212,7 @@ class PipeChannel : public PipeChannelBase {
   }
 
  protected:
-  void _Send(HANDLE pipe, Msg& msg) {
+  void _Send(HANDLE pipe, Msg& msg, DWORD timeoutMs = kSyncIo) {
     auto ctx = _GetContext();
     char* pbuff = ctx->buffer.get();
     DWORD lwritten = 0;
@@ -182,19 +229,37 @@ class PipeChannel : public PipeChannelBase {
     if (data_sz > buff_size)
       data_sz = buff_size;
 
+    auto write = [&](HANDLE h) {
+      if (timeoutMs == kSyncIo)
+        _WritePipe(h, data_sz, pbuff);
+      else
+        _WritePipeTimed(h, data_sz, pbuff, timeoutMs);
+    };
     try {
-      _WritePipe(pipe, data_sz, pbuff);
+      write(pipe);
+    } catch (DWORD err) {
+      // A timeout is final: do not spend the budget a second time.
+      if (err == ERROR_TIMEOUT)
+        throw;
+      // Stale handle (e.g. the server restarted): reconnect once and retry.
+      // (The retry used to pass the address of the handle variable instead of
+      // the handle, so it could never succeed.)
+      _Reconnect();
+      write(*_GetPipeHandle());
     } catch (...) {
       _Reconnect();
-      _WritePipe(_GetPipeHandle(), data_sz, pbuff);
+      write(*_GetPipeHandle());
     }
     ClearBufferStream();
   }
 
-  _TyRes _ReceiveResponse() {
+  _TyRes _ReceiveResponse(DWORD timeoutMs = kSyncIo) {
     HANDLE* phandle = _GetPipeHandle();
     _TyRes result;
-    _Receive(*phandle, &result, sizeof(result));
+    if (timeoutMs == kSyncIo)
+      _Receive(*phandle, &result, sizeof(result));
+    else
+      _ReceiveTimed(*phandle, &result, sizeof(result), timeoutMs);
     return result;
   }
 

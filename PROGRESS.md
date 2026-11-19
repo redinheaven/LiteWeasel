@@ -84,6 +84,34 @@
 1. 服务端 `_Send` 去掉 Flush 后，"客户端发完请求被挂起"这条路径是否真的不再卡住服务端，没有做故障注入。
 2. `response_valid` 在"服务端无响应"时是否真的让 `DoEditSession` 跳过组字更新，要等第 2 步有了超时才能触发，现在只验证了成功路径没有被影响。
 
+**第 2 步已实施：客户端重叠 I/O 超时（`d7281d8` 之后，分支 `perf/phase0-timing`）**
+
+改动：
+
+- `WeaselIPC/PipeChannel.cpp`、`include/PipeChannel.h`：客户端句柄用 `FILE_FLAG_OVERLAPPED` 打开；新增 `_WaitOverlapped`、`_WritePipeTimed`、`_ReceiveTimed`（读写都带超时，超时后 `CancelIoEx`，并用 `GetOverlappedResult(…, TRUE)` 等取消完成才返回，因为 `OVERLAPPED` 在调用者栈上；取消的瞬间 I/O 已完成就按成功处理）。`ChannelContext` 增加每线程的 `io_event`。服务端仍用原来的同步 `_WritePipe`/`_Receive`（`kSyncIo = 0`），没有改。
+- `Transact(msg, timeoutMs)`：超时预算覆盖写请求加读响应；超时就关闭这根管道、清掉已暂存但没发出的请求体、抛 `ERROR_TIMEOUT`。写超时不再重试。
+- **顺带修了上游一个旧 bug**：`_Send` 在写失败后的重连重试里写的是 `_WritePipe(_GetPipeHandle(), …)`，传的是句柄变量的地址（`HANDLE*` 隐式转 `void*`），不是句柄，所以"重连后重试一次"这条路径从来没有成功过。现在传 `*_GetPipeHandle()`。
+- `WeaselIPC/WeaselClientImpl.cpp`：`TimeoutFor()` 按消息类型选超时：`START_MAINTENANCE`、`END_MAINTENANCE`、`SHUTDOWN_SERVER`、`TRAY_COMMAND` 不限时；`START_SESSION` 1000ms；其余 250ms。`Echo()` 的守卫从 `_Active()`（要求管道已连接）改成只要求 `session_id != 0`，因为超时后管道已关闭，`Echo` 正是 TSF 用来重连并确认会话还在的探测。新增 `ipc.echo`、`ipc.key`、`ipc.start_session`、`ipc.other` 计时点。
+- `WeaselTSF/KeyEventSink.cpp`：新增 `tsf.process_key`（`_ProcessKeyEvent` 整体）和 `tsf.ensure_server`（其中的 `_EnsureServerConnected`）计时点。
+- 新增 `tools/perf/ipc_timeout_test.cpp`（假服务端故障注入）、`fi_suspend_server.ps1`（用 `NtSuspendProcess` 挂起真实服务端）、`fi_block.py`；更新 `ipc_busy_test.cpp`（`WeaselIPC.lib` 现在引用 provider，测试程序要自己定义一个）。
+
+验证：
+
+1. **假服务端故障注入，6 组全部通过**：按键请求被拖 1500ms，客户端 264.3ms 放弃；放弃后 `GetResponseData` 被拒绝；紧接着 `Echo` 0.4ms 重连成功且会话号不变；迟到响应不串线（下一次按键收到的是它自己的 `commit=k3`，不是迟到的 `k2`）；`StartMaintenance` 被拖 700ms，等满 714.2ms 不被打断；`Echo` 被拖 1000ms，261.7ms 放弃并在之后恢复。第一次跑发现 `Echo` 超时后不重连（守卫问题，已改），第二次跑发现测试自己的 `StartMaintenance` 会清空会话号（测试问题，已改）。
+2. **真实服务端挂起 4.02 秒**（`NtSuspendProcess`，用户在记事本里连续打 `nihao`+空格）：
+   - 基线（第 1 步版本，无超时）：按键往返之间出现一个 4383ms 的空档，宿主线程被卡住。
+   - 第 2 步版本（`FI_after2b.etl`）：`tsf.process_key` 里有 5 次被卡：789、524、515、503、532ms，**合计约 2.9 秒阻塞宿主线程**（挂起窗口 4.02 秒）；`ipc.echo` 超时约 265ms，`ipc.start_session` 约 252ms（连接预算），`ipc.key` 本身没有一次超过 4.4ms；其余按键 `tsf.process_key` p50 0.95ms。
+   - 度量口径说明：第一次"改之后"抓取（`FI_after2.etl`）里的空档无法区分"宿主被卡"和"按键被快速放行"，因为超时后的按键在调用 `ProcessKeyEvent` 之前就返回，不产生 `tsf.ipc_key_roundtrip` 事件，所以后来补了 `tsf.process_key`，**基线和第 2 步版本不是同一个口径，不能算出改善百分比**。
+3. 编译：x64、x86 均 0 错误；`PipeChannel.cpp`、`WeaselClientImpl.cpp` 里是原有的 5 条和 4 条警告，没有新增。
+
+结论：**第 2 步让每次阻塞都有上限**（单个按键最多约 0.8 秒），服务端永久卡死时宿主不再被无限期卡住。但是**挂起期间每个按键仍各自等一遍超时**，4 秒内有 5 个按键各卡半秒，合计 2.9 秒，和基线的 4.4 秒相比改善有限。这正是第 3 步熔断要解决的，所以**第 3 步是第 2 步价值兑现的前提，不是可选项**。
+
+**还没验证的（第 2 步）**
+
+1. 挂起恢复后是否出现重复上屏、残留拼音或候选框、错字：ETW 看不出来，**需要用户的观察**，还没拿到。
+2. 服务端响应时去掉 `FlushFileBuffers` 后，"客户端发完请求被挂起"这条路径不再卡住服务端，仍没有做故障注入（需要挂起一个宿主进程）。
+3. `ipc.start_session` 在服务端卡住时只有约 252ms，是因为重连时连接预算（250ms）先耗尽，并没有走到它自己的 1000ms 超时；"服务端慢但能连上"的 `StartSession` 超时路径没有被真实环境覆盖（假服务端测试只测了 `ProcessKeyEvent`、`Echo`、`StartMaintenance`）。
+
 ---
 
 ## 2026-11-19 · 第 0 阶段：按键延迟计时（ETW，T1/T3/T5/T7）
