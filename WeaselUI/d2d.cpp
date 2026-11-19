@@ -5,6 +5,7 @@
 #include <VersionHelpers.hpp>
 #include <wincodec.h>
 #include <algorithm>
+#include <mutex>
 #include <regex>
 
 #pragma comment(lib, "dxguid.lib")
@@ -19,6 +20,12 @@ UINT GetDpiForWindowCompat(HWND hwnd) {
       GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
   return pGetDpiForWindow ? pGetDpiForWindow(hwnd) : 0;
 }
+
+// Guards DeviceResources::EnsureInitialized() / Reset().
+std::mutex& DeviceResourcesMutex() {
+  static std::mutex m;
+  return m;
+}
 }  // namespace
 
 // DeviceResources implementation moved from cpp to header; provide definitions
@@ -31,6 +38,9 @@ DeviceResources& DeviceResources::Get() {
 DeviceResources::DeviceResources() : initialized(false) {}
 
 HRESULT DeviceResources::EnsureInitialized() {
+  // Prewarming (WeaselUI.cpp: PrewarmGraphics) may race with the first window
+  // creation when several TSF threads of one host process get focus.
+  std::lock_guard<std::mutex> lock(DeviceResourcesMutex());
   if (initialized)
     return S_OK;
   WEASEL_PERF_SCOPE("ui.device_init");
@@ -98,6 +108,7 @@ HRESULT DeviceResources::EnsureInitialized() {
 }
 
 void DeviceResources::Reset() {
+  std::lock_guard<std::mutex> lock(DeviceResourcesMutex());
   // release shared device resources so they can be recreated
   SafeReleaseAll(direct3dDevice, dxgiDevice, dxFactory, d2Factory, d2Device,
                  dcompDevice, m_pWriteFactory, wicFactory);

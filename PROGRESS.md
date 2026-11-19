@@ -140,9 +140,63 @@
 5. 异常值：进程 2 的 `do_edit_session` 达到 66ms（其余 35–37ms），进程 1、2 的首次 IPC 往返是 8.7–10.5ms（其余 2.4ms），原因没查，样本太小。
 6. 现有"预热"是有意保留的（`AGENTS.md` 硬约束），但它**没有起到提前准备的作用**，因为它发生在第一个按键里。这是一个优化机会：把与窗口无关的 `ui.device_init`（约 17ms）提前到进程获得焦点或 TSF 激活时，**要先出方案，不直接改**：它涉及在宿主进程里什么时候、哪个线程创建 D3D 设备，属于 `AGENTS.md` 要求先出方案的高风险改动。
 
+**同一个进程里连续 6 次组字（台式机，一个记事本，`M3_multi.etl`）**
+
+前两次尝试数据无效（`M_multi`：用户开了 5 个记事本各打一个词，每个进程只有 1 次组字；`M2_multi`：抓取为空，连服务端事件都没有，原因不明）。以下是第三次，一个进程内 6 个词，共 86 个按键：
+
+| 阶段 | 第 1 次组字 | 第 2–6 次组字 |
+|---|---|---|
+| `tsf.start_composition` | 34.4 ms | 8.9–9.4 ms |
+| └ `tsf.start_ui` | 27.5 ms | 2.5–2.9 ms |
+| &nbsp;&nbsp;└ `ui.device_init` | 17.3 ms（仅此 1 次） | 不再出现 |
+| &nbsp;&nbsp;└ `ui.create` | 7.0 ms | 2.5–2.8 ms（窗口 1.2–1.4，交换链 1.3，`dwrite_init` 降为 8µs） |
+| `start_composition` 里 `start_ui` 之外 | ≈ 6.9 | ≈ 6.5 |
+| 该次组字第一个按键的 `do_edit_session` | 35.5 ms | 10.5–11.1 ms |
+| 其余按键 `do_edit_session` 中位数 | 1.57 ms | — |
+
+结论：
+
+1. `EndUI` 每次组字结束都会销毁候选窗（`Composition.cpp:129`、`:437`），之后每次组字重建窗口，但只花约 2.7ms（`DeviceResources` 单例保留，`device_init` 和 `dwrite_init` 不再重复）。**"保留候选窗不销毁"收益很小（约 2.7ms/词），决定不做。**
+2. **每次组字的第一个按键仍要约 11ms，其中约 6.5ms 在 `start_composition` 里 `start_ui` 之外**（`CStartCompositionEditSession` 的创建和 `RequestEditSession`，其中有宿主的同步工作），这部分原因未知，每个词都要付一次，值得单独量。
+3. 第 1 次组字比后面多出的 ≈ 25ms，几乎全是 `device_init`（17.3）、`ui.create` 里的 `dwrite_init`（2.9）、`attach`（首次多 1.7）和首次 `warmup`（2.9）。其中 `device_init` 与窗口无关，可以提前。
+
+**阶段 A 落地：在线程获得焦点时预热图形设备（台式机，5 个新记事本进程，`A3_cold.etl`，对比基线 `A2_cold.etl`）**
+
+改动（未提交）：
+
+- `WeaselUI/d2d.cpp`：`DeviceResources::EnsureInitialized()` 和 `Reset()` 用 `std::mutex` 保护（原来 `initialized` 是无保护的 `bool`）。
+- `include/WeaselUI.h`、`WeaselUI/WeaselUI.cpp`：新增 `weasel::PrewarmGraphics()`，内部调用 `DeviceResources::Get().EnsureInitialized()`。
+- `WeaselTSF/WeaselTSF.cpp`：`OnSetThreadFocus()` 末尾，在 `_ProcessKeyEvent` 会处理按键的同样条件下（`!((_isToOpenClose && !_IsKeyboardOpen()) || _IsKeyboardDisabled())`）调用它，外面套计时点 `tsf.prewarm_graphics`。
+- 没有动：COM 接口、IPC 格式、DPI 逻辑、WARP 优先再退回硬件的逻辑、`StartUI` 里的 `Refresh()`+`Hide()`。
+
+x64、x86 均编译通过，0 错误。我改动的文件里没有新警告（`d2d.cpp` 的 5 条是原有的，行号后移 11 行）；总警告数 25/22 比上次的 24/20 多，是因为改了 `WeaselUI.h` 后更多文件被重编，带出了它们原有的警告。
+
+第一个按键的各阶段，5 个新进程的中位数，单位 ms（括号为范围）：
+
+| 阶段 | A2 基线 | A3 预热后 |
+|---|---|---|
+| `tsf.do_edit_session` | 36.5（35.2–66.3） | **19.4（18.8–20.5）** |
+| └ `tsf.start_composition` | 35.2（33.9–38.4） | 18.0（17.5–19.0） |
+| &nbsp;&nbsp;└ `tsf.start_ui` | 27.7（26.9–31.4） | 10.9（10.7–11.3） |
+| &nbsp;&nbsp;&nbsp;&nbsp;└ `make_window` | 24.6（24.1–26.9） | 8.1（7.6–8.5） |
+| `ui.device_init` | 17.2（在按键路径上） | 17.0（16.6–17.4，**现在在 `tsf.prewarm_graphics` 里，发生在获得焦点时**） |
+| `tsf.prewarm_graphics`（焦点路径） | — | **17.2（16.6–17.4）** |
+| 后续按键 `do_edit_session` 中位数 | 1.5 | 1.4（无退化） |
+| 首次 `tsf.update_ui` / 首次 `ui.do_paint` | 6.1 / 6.6 | 5.9 / 6.5（不变） |
+
+结论：
+
+1. **首键 `do_edit_session` 从约 36.5ms 降到约 19.4ms，减少约 17ms（约 47%）**，和预期一致，达到验收标准"中位数 ≤ 20ms"。
+2. 代价：每个进程第一次获得焦点且键盘可用时，UI 线程同步多阻塞约 17ms（`tsf.prewarm_graphics`）。这是从按键路径挪到焦点路径，**不是消除**。台式机上 17ms，目标笔记本上多少没有测。
+3. 首次 IPC 往返在 A3 的 5 个进程里都是 8.4–9.9ms（A2 里 3 个是 2.4ms，2 个是 8.7–10.5ms）。逐个对照服务端的 `srv.on_key_event`，往返耗时基本等于服务端处理耗时（例如 9875 对 9744），所以**波动在服务端，不在客户端预热**。原因没有查清楚，可能和服务端空闲后的冷启动有关，**这只是推测**。它有时和预热省下的时间一样大，值得单独查（和第 3 阶段"服务端优先级"相关）。
+4. **还没测内存**：预热让每个获得过焦点的进程都提前加载 D3D11/WARP 等 DLL，会多占内存。需要在新进程获得焦点前后分别取工作集和私有字节。
+5. 首键之后到候选框画完仍然有：`update_ui`（≈6ms）、`do_paint`（≈6.5ms）、`start_composition` 里 `start_ui` 之外的约 7ms。这是下一批可优化项。
+
 **还没验证的**
 
-1. 没有测过开启和关闭 ETW 时的额外开销。
+1. 内存增量没测（见上）。
+2. 目标笔记本上的焦点卡顿和首键延迟没测。
+3. 没有测过开启和关闭 ETW 时的额外开销。
 2. 没有分离"新程序里的第一个字"（冷启动）、部署期间、睡眠唤醒后这几个场景的数据，这次是混在一起的一次连续输入。
 3. 没有目标笔记本上的数据。
 4. 用户在本机的输入法现在是我们的测试版（官方 0.17.4 已卸载）。要退回，卸载测试版、重装官方版即可，词库不用动。

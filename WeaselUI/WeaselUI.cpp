@@ -91,6 +91,9 @@ void UI::Update(const Context& ctx, const Status& status) {
   }
   Refresh();
 }
+HRESULT PrewarmGraphics() {
+  return DeviceResources::Get().EnsureInitialized();
+}
 void UI::Refresh() {
   if (pimpl_) {
     pimpl_->Refresh();

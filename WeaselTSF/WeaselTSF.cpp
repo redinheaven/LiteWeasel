@@ -5,6 +5,8 @@
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include "WeaselTSF.h"
+#include <WeaselPerf.h>
+#include <WeaselUI.h>
 #include "CandidateList.h"
 #include "LanguageBar.h"
 #include "Compartment.h"
@@ -182,6 +184,13 @@ STDMETHODIMP WeaselTSF::OnSetThreadFocus() {
     bool ok = m_client.GetResponseData(std::ref(parser));
     if (ok)
       _UpdateLanguageBar(_status);
+  }
+  // Create the graphics device resources now, off the key path, so the first
+  // composition in this process does not pay ~17 ms for them. Same conditions
+  // under which _ProcessKeyEvent() would handle a key.
+  if (!((_isToOpenClose && !_IsKeyboardOpen()) || _IsKeyboardDisabled())) {
+    WEASEL_PERF_SCOPE("tsf.prewarm_graphics");
+    weasel::PrewarmGraphics();
   }
   return S_OK;
 }
