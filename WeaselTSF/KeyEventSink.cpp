@@ -22,7 +22,7 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
   bool server_ok;
   {
     WEASEL_PERF_SCOPE("tsf.ensure_server");
-    server_ok = _EnsureServerConnected();
+    server_ok = _EnsureServerConnected(/*allowCached=*/true);
   }
   if (!server_ok) {
     *pfEaten = FALSE;
@@ -49,6 +49,16 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!keyCountToSimulate) {
       WEASEL_PERF_SCOPE("tsf.ipc_key_roundtrip");
       *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
+      // If we skipped Echo and the server died or restarted in that window,
+      // re-verify/recreate the session once and retry this key so it is not
+      // dropped. (Normal "key not eaten" leaves LastRequestFailed() == false.)
+      if (m_client.LastRequestFailed() && !m_client.Suspended()) {
+        if (_EnsureServerConnected(/*allowCached=*/false)) {
+          *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
+        } else if (m_client.Suspended() && _IsComposing()) {
+          _AbortComposition();
+        }
+      }
     }
 
     if (ke.keycode == ibus::Caps_Lock) {

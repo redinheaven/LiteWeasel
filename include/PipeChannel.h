@@ -26,13 +26,17 @@ class PipeChannelBase {
     // busy for the whole connect budget (the server is there but unresponsive),
     // as opposed to the pipe not existing at all (no server).
     bool connect_timed_out;
+    // Set when _Send() had to reconnect a broken pipe handle inside Transact()
+    // (e.g. the server restarted while the client skipped Echo).
+    bool reconnected;
 
     ChannelContext(size_t bs)
         : buffer(std::make_unique<char[]>(bs)),
           has_body(false),
           response_valid(true),
           io_event(::CreateEventW(NULL, TRUE, FALSE, NULL)),
-          connect_timed_out(false) {}
+          connect_timed_out(false),
+          reconnected(false) {}
     ~ChannelContext() {
       if (io_event)
         ::CloseHandle(io_event);
@@ -50,10 +54,13 @@ class PipeChannelBase {
   ~PipeChannelBase();
 
  protected:
+  static constexpr DWORD kDefaultConnectBudgetMs = 250;
+
   /* To ensure connection before operation */
-  bool _Ensure();
+  bool _Ensure(DWORD connectBudgetMs = kDefaultConnectBudgetMs);
   /* Connect pipe as client */
-  HANDLE _Connect(const wchar_t* name);
+  HANDLE _Connect(const wchar_t* name,
+                  DWORD budgetMs = kDefaultConnectBudgetMs);
   /* To reconnect message pipe */
   void _Reconnect();
   /* Try to connect for one time */
@@ -159,7 +166,9 @@ class PipeChannel : public PipeChannelBase {
   _TyRes Transact(Msg& msg, DWORD timeoutMs = INFINITE) {
     if (timeoutMs == kSyncIo)
       timeoutMs = INFINITE;
-    _GetContext()->response_valid = false;
+    auto ctx = _GetContext();
+    ctx->response_valid = false;
+    ctx->reconnected = false;
     HANDLE* phandle = _GetPipeHandle();
     const ULONGLONG start = ::GetTickCount64();
     try {
@@ -167,19 +176,23 @@ class PipeChannel : public PipeChannelBase {
       // invalid handle and reconnecting again. ERROR_TIMEOUT means the pipe is
       // there but stayed busy for the whole connect budget; ERROR_PIPE_NOT_
       // CONNECTED means it does not exist.
-      if (!_Ensure())
+      const DWORD connectBudget =
+          (timeoutMs < kDefaultConnectBudgetMs) ? timeoutMs
+                                                : kDefaultConnectBudgetMs;
+      if (!_Ensure(connectBudget))
         throw static_cast<DWORD>(_GetContext()->connect_timed_out
                                      ? ERROR_TIMEOUT
                                      : ERROR_PIPE_NOT_CONNECTED);
-      _Send(*phandle, msg, timeoutMs);
-      DWORD remaining = timeoutMs;
-      if (timeoutMs != INFINITE) {
+      auto remainingBudget = [&]() -> DWORD {
+        if (timeoutMs == INFINITE)
+          return INFINITE;
         const ULONGLONG elapsed = ::GetTickCount64() - start;
-        remaining = elapsed >= timeoutMs
-                        ? 1
-                        : static_cast<DWORD>(timeoutMs - elapsed);
-      }
-      _TyRes result = _ReceiveResponse(remaining);
+        return elapsed >= timeoutMs
+                   ? 1
+                   : static_cast<DWORD>(timeoutMs - elapsed);
+      };
+      _Send(*phandle, msg, remainingBudget());
+      _TyRes result = _ReceiveResponse(remainingBudget());
       _GetContext()->response_valid = true;
       return result;
     } catch (DWORD err) {
@@ -191,6 +204,8 @@ class PipeChannel : public PipeChannelBase {
       throw;
     }
   }
+
+  bool WasReconnected() const { return _GetContext()->reconnected; }
 
   void ClearBufferStream() {
     auto ctx = _GetContext();
@@ -253,9 +268,11 @@ class PipeChannel : public PipeChannelBase {
       // Stale handle (e.g. the server restarted): reconnect once and retry.
       // (The retry used to pass the address of the handle variable instead of
       // the handle, so it could never succeed.)
+      ctx->reconnected = true;
       _Reconnect();
       write(*_GetPipeHandle());
     } catch (...) {
+      ctx->reconnected = true;
       _Reconnect();
       write(*_GetPipeHandle());
     }

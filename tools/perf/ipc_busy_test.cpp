@@ -40,5 +40,25 @@ int main() {
   weasel::KeyEvent ke('n', 0);
   bool eaten = c.ProcessKeyEvent(ke);
   printf("Client::ProcessKeyEvent -> %d after %.1f ms\n", eaten, Ms(t0, Now()));
+
+  // Trip breaker via two busy StartSession timeouts, then verify the probe
+  // also honors the ~100 ms probe timeout during the connect wait.
+  c.StartSession();
+  printf("Suspended after 2nd busy StartSession -> %d\n", c.Suspended() ? 1 : 0);
+  if (c.Suspended()) {
+    t0 = Now();
+    c.StartSession();
+    printf("Blocked StartSession    -> %.1f ms (expect < 20 ms)\n", Ms(t0, Now()));
+    Sleep(3200);
+    t0 = Now();
+    c.StartSession();
+    double probe_ms = Ms(t0, Now());
+    printf("Busy probe StartSession -> %.1f ms (expect ~100 ms, < 180 ms)\n", probe_ms);
+    if (probe_ms >= 180.0 || !c.Suspended()) {
+      printf("FAIL: busy probe exceeded 180 ms or did not re-open breaker\n");
+      return 5;
+    }
+    printf("PASS: busy probe respected ~100 ms connect budget\n");
+  }
   return 0;
 }

@@ -20,6 +20,10 @@ static LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.Q
 
 static std::atomic<int> g_key_delay{0}, g_echo_delay{0}, g_maint_delay{0};
 static std::atomic<int> g_key_counter{0};
+static std::atomic<int> g_echo_count{0};
+static std::atomic<DWORD> g_valid_session{7};
+static std::atomic<bool> g_drop_next_key_pipe{false};
+static std::atomic<bool> g_eat_keys{true};
 static std::atomic<bool> g_stop{false};
 static const wchar_t* kBody = L"commit=k\n";
 
@@ -42,9 +46,26 @@ static void Serve(HANDLE pipe) {
     if (got < sizeof(weasel::PipeMessage)) break;
     weasel::PipeMessage m; memcpy(&m, local, sizeof(m));
     switch (m.Msg) {
-      case WEASEL_IPC_START_SESSION: Reply(pipe, 7, true, 0); break;
-      case WEASEL_IPC_ECHO: if (g_echo_delay) Sleep(g_echo_delay); Reply(pipe, m.lParam, false, 0); break;
-      case WEASEL_IPC_PROCESS_KEY_EVENT: { int tag = ++g_key_counter; if (g_key_delay) Sleep(g_key_delay); Reply(pipe, 1, true, tag); break; }
+      case WEASEL_IPC_START_SESSION: Reply(pipe, g_valid_session.load(), true, 0); break;
+      case WEASEL_IPC_ECHO:
+        ++g_echo_count;
+        if (g_echo_delay) Sleep(g_echo_delay);
+        Reply(pipe, m.lParam == g_valid_session.load() ? m.lParam : 0, false, 0);
+        break;
+      case WEASEL_IPC_PROCESS_KEY_EVENT: {
+        if (g_drop_next_key_pipe.exchange(false)) {
+          // Simulate a restarted server: sever this pipe and bump the valid session id.
+          g_valid_session.store(9);
+          DisconnectNamedPipe(pipe);
+          CloseHandle(pipe);
+          return;
+        }
+        int tag = ++g_key_counter;
+        if (g_key_delay) Sleep(g_key_delay);
+        bool known = (m.lParam == g_valid_session.load());
+        Reply(pipe, (known && g_eat_keys.load()) ? 1 : 0, known, tag);
+        break;
+      }
       case WEASEL_IPC_START_MAINTENANCE: if (g_maint_delay) Sleep(g_maint_delay); Reply(pipe, 0, false, 0); break;
       default: Reply(pipe, 0, false, 0); break;
     }
@@ -140,6 +161,53 @@ int main() {
   t = Now(); c.StartMaintenance(); ms = Ms(t, Now());
   Check(ms >= 350 && ms < 1500, "StartMaintenance still goes through and waits 400 ms", ms);
   g_maint_delay = 0; g_echo_delay = 0;
+
+  printf("9. skip-Echo liveness cache & mid-typing server restart recovery\n");
+  Sleep(3200);
+  c.StartSession();
+  Check(c.IsRecentlyAlive(1000) && !c.LastRequestFailed(), "IsRecentlyAlive true right after StartSession", 0);
+  int e0 = g_echo_count.load();
+  // Benchmark 100 keys without Echo vs 100 keys with Echo
+  LONGLONG tb0 = Now();
+  for (int i = 0; i < 100; ++i) {
+    if (!c.IsRecentlyAlive(1000)) c.Echo();
+    c.ProcessKeyEvent(weasel::KeyEvent('a', 0));
+  }
+  double no_echo_ms = Ms(tb0, Now());
+  Check(g_echo_count.load() == e0 && c.IsRecentlyAlive(1000) && !c.LastRequestFailed(),
+        "100 consecutive keys sent 0 Echo calls", no_echo_ms);
+  LONGLONG tb1 = Now();
+  for (int i = 0; i < 100; ++i) {
+    c.Echo();
+    c.ProcessKeyEvent(weasel::KeyEvent('a', 0));
+  }
+  double with_echo_ms = Ms(tb1, Now());
+  printf("     100 keys IPC total: with Echo = %.2f ms  vs  skip Echo = %.2f ms\n", with_echo_ms, no_echo_ms);
+
+  // Normal non-eaten key must NOT look like an IPC failure.
+  g_eat_keys = false;
+  r = c.ProcessKeyEvent(weasel::KeyEvent('a', 0));
+  Check(!r && !c.LastRequestFailed() && c.IsRecentlyAlive(1000),
+        "non-eaten key leaves LastRequestFailed=false and stays alive", 0);
+  g_eat_keys = true;
+
+  // Idle > 1000 ms expires the liveness cache.
+  Sleep(1050);
+  Check(!c.IsRecentlyAlive(1000), "IsRecentlyAlive expires after 1000 ms idle", 0);
+  Check(c.Echo() && c.IsRecentlyAlive(1000), "Echo refreshes liveness after idle", 0);
+
+  // Server restarts mid-typing while IsRecentlyAlive is true: pipe breaks on key,
+  // client detects it (LastRequestFailed=true), recreates session, retries key.
+  g_drop_next_key_pipe = true;
+  r = c.ProcessKeyEvent(weasel::KeyEvent('z', 0));
+  Check(!r && c.LastRequestFailed() && !c.IsRecentlyAlive(1000),
+        "server restart mid-key flags LastRequestFailed and invalidates cache", 0);
+  Check(!c.Echo(), "Echo detects old session_id is invalid on restarted server", 0);
+  c.Disconnect(); c.Connect(nullptr); c.StartSession();
+  r = c.ProcessKeyEvent(weasel::KeyEvent('z', 0));
+  Check(r && !c.LastRequestFailed() && c.IsRecentlyAlive(1000),
+        "reconnect + retry succeeds without dropping the key", 0);
+
   printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail, g_fail == 1 ? "" : "s");
   g_stop = true;
   return g_fail ? 1 : 0;

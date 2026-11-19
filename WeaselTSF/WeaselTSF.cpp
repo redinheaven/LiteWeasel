@@ -246,13 +246,21 @@ void WeaselTSF::_Reconnect() {
 
 static unsigned int retry = 0;
 
-bool WeaselTSF::_EnsureServerConnected() {
+bool WeaselTSF::_EnsureServerConnected(bool allowCached) {
   // The server stopped answering and the circuit breaker is open: do not
   // reconnect, probe or relaunch on every key; keys pass through to the app
   // until the breaker lets a probe request through.
   if (m_client.Suspended())
     return false;
+  // Skip the per-key Echo round-trip during active typing if a recent IPC
+  // transaction already proved the pipe and session alive.
+  if (allowCached && m_client.IsRecentlyAlive(1000))
+    return true;
   if (!m_client.Echo()) {
+    // If the Echo probe just tripped or re-opened the circuit breaker, do not
+    // waste another connect budget inside _Reconnect().
+    if (m_client.Suspended())
+      return false;
     _Reconnect();
     retry++;
     if (retry >= 6) {

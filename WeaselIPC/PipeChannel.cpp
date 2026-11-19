@@ -24,11 +24,11 @@ PipeChannelBase::~PipeChannelBase() {
   // Thread-specific pointers are cleaned up automatically
 }
 
-bool PipeChannelBase::_Ensure() {
+bool PipeChannelBase::_Ensure(DWORD connectBudgetMs) {
   try {
     HANDLE* phandle = _GetPipeHandle();
     if (_Invalid(*phandle)) {
-      *phandle = _Connect(pname.c_str());
+      *phandle = _Connect(pname.c_str(), connectBudgetMs);
       return !_Invalid(*phandle);
     }
   } catch (...) {
@@ -38,11 +38,10 @@ bool PipeChannelBase::_Ensure() {
   return true;
 }
 
-HANDLE PipeChannelBase::_Connect(const wchar_t* name) {
+HANDLE PipeChannelBase::_Connect(const wchar_t* name, DWORD budgetMs) {
   // All pipe instances can be busy for a while (e.g. a stuck server). Wait for
   // a free instance, but never forever: a host UI thread may be calling this.
-  constexpr ULONGLONG kConnectBudgetMs = 250;
-  const ULONGLONG deadline = ::GetTickCount64() + kConnectBudgetMs;
+  const ULONGLONG deadline = ::GetTickCount64() + budgetMs;
   _GetContext()->connect_timed_out = false;
   HANDLE pipe = INVALID_HANDLE_VALUE;
   while (_Invalid(pipe = _TryConnect())) {

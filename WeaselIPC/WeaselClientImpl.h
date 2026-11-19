@@ -30,6 +30,8 @@ class ClientImpl {
   bool GetResponseData(ResponseHandler const& handler);
   // True while the process-wide circuit breaker refuses requests.
   static bool Suspended();
+  bool IsRecentlyAlive(DWORD maxAgeMs) const;
+  bool LastRequestFailed() const { return last_ipc_failed; }
 
  protected:
   void _InitializeClientInfo();
@@ -44,6 +46,8 @@ class ClientImpl {
   UINT session_id;
   std::wstring app_name;
   bool is_ime;
+  ULONGLONG last_verified_tick;
+  bool last_ipc_failed;
 
   PipeChannel<PipeMessage> channel;
 };

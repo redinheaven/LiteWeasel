@@ -7,7 +7,11 @@
 using namespace weasel;
 
 ClientImpl::ClientImpl()
-    : session_id(0), channel(GetPipeName()), is_ime(false) {
+    : session_id(0),
+      is_ime(false),
+      last_verified_tick(0),
+      last_ipc_failed(false),
+      channel(GetPipeName()) {
   _InitializeClientInfo();
 }
 
@@ -50,6 +54,7 @@ bool ClientImpl::Connect(ServerLauncher const& launcher) {
 void ClientImpl::Disconnect() {
   if (_Active())
     EndSession();
+  last_verified_tick = 0;
   channel.Disconnect();
 }
 
@@ -58,8 +63,10 @@ void ClientImpl::ShutdownServer() {
 }
 
 bool ClientImpl::ProcessKeyEvent(KeyEvent const& keyEvent) {
-  if (!_Active())
+  if (!_Active()) {
+    last_ipc_failed = true;
     return false;
+  }
 
   LRESULT ret =
       _SendMessage(WEASEL_IPC_PROCESS_KEY_EVENT, keyEvent, session_id);
@@ -156,16 +163,19 @@ void ClientImpl::StartSession() {
 void ClientImpl::EndSession() {
   _SendMessage(WEASEL_IPC_END_SESSION, 0, session_id);
   session_id = 0;
+  last_verified_tick = 0;
 }
 
 void ClientImpl::StartMaintenance() {
   _SendMessage(WEASEL_IPC_START_MAINTENANCE, 0, 0);
   session_id = 0;
+  last_verified_tick = 0;
 }
 
 void ClientImpl::EndMaintenance() {
   _SendMessage(WEASEL_IPC_END_MAINTENANCE, 0, 0);
   session_id = 0;
+  last_verified_tick = 0;
 }
 
 bool ClientImpl::Echo() {
@@ -336,18 +346,28 @@ bool ClientImpl::Suspended() {
   return g_breaker.Suspended();
 }
 
+bool ClientImpl::IsRecentlyAlive(DWORD maxAgeMs) const {
+  if (g_breaker.Suspended() || !_Active() || last_verified_tick == 0)
+    return false;
+  return (::GetTickCount64() - last_verified_tick) < maxAgeMs;
+}
+
 LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
                                  DWORD wParam,
                                  DWORD lParam) {
   WEASEL_PERF_SCOPE(PerfNameFor(Msg));
+  last_ipc_failed = false;
   DWORD timeout = TimeoutFor(Msg);
   // Only requests with a bounded timeout (the input-method path) are guarded.
   const bool guarded = timeout != INFINITE;
   CircuitBreaker::Verdict verdict = CircuitBreaker::Verdict::Pass;
   if (guarded) {
     verdict = g_breaker.Enter();
-    if (verdict == CircuitBreaker::Verdict::Block)
+    if (verdict == CircuitBreaker::Verdict::Block) {
+      last_ipc_failed = true;
+      last_verified_tick = 0;
       return 0;
+    }
     if (verdict == CircuitBreaker::Verdict::Probe && timeout > kProbeTimeoutMs)
       timeout = kProbeTimeoutMs;
   }
@@ -357,8 +377,27 @@ LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
     LRESULT result = channel.Transact(req, timeout);
     if (guarded)
       g_breaker.Success();
+    if (channel.WasReconnected()) {
+      // The underlying pipe broke and transparently reconnected (e.g. server
+      // restarted). The server may no longer know our session_id, so invalidate
+      // freshness and ask the caller to re-verify / recreate the session.
+      last_verified_tick = 0;
+      if (Msg != WEASEL_IPC_ECHO && Msg != WEASEL_IPC_START_SESSION)
+        last_ipc_failed = true;
+    } else if (Msg == WEASEL_IPC_ECHO) {
+      last_verified_tick =
+          (session_id != 0 && static_cast<UINT>(result) == session_id)
+              ? ::GetTickCount64()
+              : 0;
+    } else if (Msg == WEASEL_IPC_START_SESSION) {
+      last_verified_tick = (result != 0) ? ::GetTickCount64() : 0;
+    } else if (guarded) {
+      last_verified_tick = ::GetTickCount64();
+    }
     return result;
   } catch (DWORD err) {
+    last_ipc_failed = true;
+    last_verified_tick = 0;
     if (guarded) {
       if (err == ERROR_TIMEOUT)
         g_breaker.Unresponsive(probe);
@@ -367,6 +406,8 @@ LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
     }
     return 0;
   } catch (...) {
+    last_ipc_failed = true;
+    last_verified_tick = 0;
     if (guarded)
       g_breaker.Gone();  // never leave a probe flag set
     throw;
@@ -458,4 +499,12 @@ bool Client::GetResponseData(ResponseHandler handler) {
 
 bool Client::Suspended() const {
   return ClientImpl::Suspended();
+}
+
+bool Client::IsRecentlyAlive(DWORD maxAgeMs) const {
+  return m_pImpl->IsRecentlyAlive(maxAgeMs);
+}
+
+bool Client::LastRequestFailed() const {
+  return m_pImpl->LastRequestFailed();
 }
