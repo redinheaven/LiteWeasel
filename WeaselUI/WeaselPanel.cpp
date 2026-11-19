@@ -1,4 +1,5 @@
 #include "WeaselPanel.h"
+#include <WeaselPerf.h>
 #include "FullScreenLayout.h"
 #include "HorizontalLayout.h"
 #include "VHorizontalLayout.h"
@@ -421,6 +422,7 @@ void WeaselPanel::_UpdateOffsetY(CRect& arc, CRect& prc) {
 }
 
 void WeaselPanel::DoPaint() {
+  WEASEL_PERF_SCOPE("ui.do_paint");
   if (!m_pD2D || !m_layout || !m_pD2D->dc || !m_pD2D->swapChain)
     return;
   auto hr = m_pD2D->direct3dDevice
@@ -495,7 +497,11 @@ void WeaselPanel::DoPaint() {
     return;
   }
   // Make the swap chain available to the composition engine
-  HRESULT hrPresent = m_pD2D->swapChain->Present(1, 0);  // sync
+  HRESULT hrPresent;
+  {
+    WEASEL_PERF_SCOPE("ui.present");
+    hrPresent = m_pD2D->swapChain->Present(1, 0);  // sync
+  }
   if (hrPresent == DXGI_ERROR_DEVICE_REMOVED ||
       hrPresent == DXGI_ERROR_DEVICE_RESET) {
     DEBUG << "Device lost during Present: " << HRESULTToString(hrPresent);

@@ -1,5 +1,27 @@
 #include "WeaselPanel.h"
 #include <WeaselUI.h>
+#include <WeaselPerf.h>
+
+// ETW provider for latency tracing, see include/WeaselPerf.h.
+TRACELOGGING_DEFINE_PROVIDER(g_hWeaselPerf,
+                             "LiteWeasel-Perf",
+                             (0x5974258d,
+                              0x005e,
+                              0x4490,
+                              0xad,
+                              0xef,
+                              0x9e,
+                              0x26,
+                              0x5b,
+                              0x26,
+                              0xab,
+                              0xf5));
+namespace {
+struct WeaselPerfRegistration {
+  WeaselPerfRegistration() { TraceLoggingRegister(g_hWeaselPerf); }
+  ~WeaselPerfRegistration() { TraceLoggingUnregister(g_hWeaselPerf); }
+} g_weaselPerfRegistration;
+}  // namespace
 
 namespace weasel {
 // ----------------------------------------------------------------------------

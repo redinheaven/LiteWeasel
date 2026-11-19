@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include <WeaselPerf.h>
 #include "WeaselTSF.h"
 #include "EditSession.h"
 #include "ResponseParser.h"
@@ -394,6 +395,8 @@ void WeaselTSF::_UpdateComposition(com_ptr<ITfContext> pContext) {
 
   _pEditSessionContext = pContext;
 
+  if (weasel::perf::Enabled())
+    weasel::perf::g_editRequestQpc = weasel::perf::Now();
   _pEditSessionContext->RequestEditSession(
       _tfClientId, this, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hr);
   _async_edit = !!(hr == TF_S_ASYNC);

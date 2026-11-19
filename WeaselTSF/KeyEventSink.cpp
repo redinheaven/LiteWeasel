@@ -2,6 +2,7 @@
 #include "WeaselIPC.h"
 #include "WeaselTSF.h"
 #include <KeyEvent.h>
+#include <WeaselPerf.h>
 #include "CandidateList.h"
 
 static weasel::KeyEvent prevKeyEvent;
@@ -34,8 +35,10 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
       else if (ke.keycode == ibus::Down)
         ke.keycode = ibus::Up;
     }
-    if (!keyCountToSimulate)
+    if (!keyCountToSimulate) {
+      WEASEL_PERF_SCOPE("tsf.ipc_key_roundtrip");
       *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
+    }
 
     if (ke.keycode == ibus::Caps_Lock) {
       if (prevKeyEvent.keycode == ibus::Caps_Lock && prevfEaten == TRUE &&

@@ -2,8 +2,17 @@
 #include "WeaselTSF.h"
 #include "CandidateList.h"
 #include "ResponseParser.h"
+#include <WeaselPerf.h>
 
 STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
+  // time between RequestEditSession and this callback
+  if (weasel::perf::g_editRequestQpc) {
+    if (weasel::perf::Enabled())
+      weasel::perf::Emit("tsf.edit_session_wait",
+                         weasel::perf::g_editRequestQpc);
+    weasel::perf::g_editRequestQpc = 0;
+  }
+  WEASEL_PERF_SCOPE("tsf.do_edit_session");
   // get commit string from server
   std::wstring commit;
   weasel::Config config;
@@ -11,7 +20,11 @@ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
   weasel::ResponseParser parser(&commit, context.get(), &_status, &config,
                                 &_cand->style());
 
-  bool ok = m_client.GetResponseData(std::ref(parser));
+  bool ok;
+  {
+    WEASEL_PERF_SCOPE("tsf.get_response");
+    ok = m_client.GetResponseData(std::ref(parser));
+  }
 
   _UpdateLanguageBar(_status);
 

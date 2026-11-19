@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <resource.h>
 #include <WeaselUtility.h>
+#include <WeaselPerf.h>
 
 namespace weasel {
 class PipeServer : public PipeChannel<DWORD, PipeMessage> {
@@ -234,7 +235,8 @@ DWORD ServerImpl::OnKeyEvent(WEASEL_IPC_COMMAND uMsg,
   if (!m_pRequestHandler /* || !m_pSharedMemory*/)
     return 0;
 
-  auto eat = [this](std::wstring& msg) -> bool {
+  WEASEL_PERF_SCOPE("srv.on_key_event");
+  auto eat =[this](std::wstring& msg) -> bool {
     *channel << msg;
     return true;
   };
